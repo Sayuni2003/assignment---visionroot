@@ -150,7 +150,7 @@ Pages and components never call `fetch` themselves. They call the functions in `
 
 - Every call sends `credentials: 'include'`, so the browser stores and sends the HttpOnly auth cookies. A `body` is sent as JSON; `params` become the query string, skipping `undefined`, `null` and empty values (so an "All" filter is simply left out).
 - A success returns the parsed response body. A failure throws an `Error` whose `message` is the backend's `message` (or `Something went wrong`), with `status` set to the HTTP status and `errors` set to the backend's per-field errors, if any. If the server cannot be reached, the message is `Cannot reach the server. Please try again.`
-- Session refresh is handled here (see [Session handling in the frontend](#session-handling-in-the-frontend)).
+- Session refresh is handled here (see [Authentication & Authorization](#7-authentication--authorization)).
 
 | File | Functions |
 | ---- | --------- |
@@ -200,7 +200,7 @@ In development the frontend (`http://localhost:5173`) calls the API directly at 
 - Every API request must include credentials (`fetch(url, { credentials: 'include' })` or axios `withCredentials: true`); otherwise the browser neither stores nor sends the auth cookies.
 - Open the app at `http://localhost:5173`, not `http://127.0.0.1:5173`. `127.0.0.1` and `localhost` are different sites, so the cookies would not be sent and CORS would reject the request.
 
-**Production must keep the frontend and the API same-site too**, for example by serving the API under `/api` on the frontend's domain through a rewrite or reverse proxy. If they must live on different sites, the cookies need `SameSite=None` together with `Secure` (see `backend/src/utils/cookies.js`), and CSRF protection has to be revisited (see [CSRF](#csrf)).
+**Production must keep the frontend and the API same-site too**, for example by serving the API under `/api` on the frontend's domain through a rewrite or reverse proxy. If they must live on different sites, the cookies need `SameSite=None` together with `Secure` (see `backend/src/utils/cookies.js`), and CSRF protection has to be revisited.
 
 ## 6. Database Design
 
@@ -288,85 +288,39 @@ One document per login session. Its `_id` is the session id (`sid`) carried insi
 
 ## 7. Authentication & Authorization
 
-### Access and refresh tokens
+### Tokens and cookies
 
-Logging in creates a **session** and issues two tokens:
+Logging in creates a session and sets two `HttpOnly`, `SameSite=Lax` cookies (`Secure` when `NODE_ENV=production`). Tokens are never returned in response bodies.
 
-- **Access token**: a JWT (HS256) signed with `JWT_ACCESS_SECRET`, valid for **15 minutes** (`ACCESS_TOKEN_EXPIRES_MINUTES`, which sets both the JWT expiry and the cookie's `Max-Age`). It is sent with every request and proves who the caller is. It contains only the user id (`sub`) and the session id (`sid`), not the role.
-- **Refresh token**: a random 80-character hex string (40 random bytes from Node's `crypto`), valid for **7 days** (`REFRESH_TOKEN_EXPIRES_DAYS`). It is only used to get a new access token from `POST /api/auth/refresh`.
+| Cookie | Contents | Lifetime | Path |
+| ------ | -------- | -------- | ---- |
+| `accessToken` | JWT (HS256) with the user id (`sub`) and session id (`sid`) | 15 minutes (`ACCESS_TOKEN_EXPIRES_MINUTES`) | `/` |
+| `refreshToken` | Random 80-character hex string | 7 days (`REFRESH_TOKEN_EXPIRES_DAYS`) | `/api/auth` |
 
-The split keeps the token that travels on every request short-lived, while the user still stays logged in for a week. When an access token expires the client calls `/refresh` and retries.
+### Sessions
 
-### Why HttpOnly cookies
-
-Both tokens are stored in `HttpOnly` cookies, never in `localStorage` or response bodies. JavaScript on the page cannot read HttpOnly cookies, so an XSS bug cannot steal the tokens. The cookies are `SameSite=Lax`, and `Secure` when `NODE_ENV=production` so they are only sent over HTTPS.
-
-| Cookie | Path | Sent to |
-| ------ | ---- | ------- |
-| `accessToken` | `/` | Every API call |
-| `refreshToken` | `/api/auth` | Only `/api/auth/*` (refresh and logout), which limits where the long-lived token is exposed |
-
-If the frontend and API are deployed on different sites (different registrable domains), browsers will not send `SameSite=Lax` cookies with cross-site API calls. Keep them same-site (see [Frontend and API on the same site](#frontend-and-api-on-the-same-site)), or switch to `SameSite=None` together with `Secure` (see `src/utils/cookies.js`).
-
-### CSRF
-
-Cookie authentication is exposed to cross-site request forgery: a malicious page makes the victim's browser send a request that automatically carries their cookies. Two layers prevent this without a separate CSRF token:
-
-- **`SameSite=Lax`**: browsers do not attach the cookies to cross-site `POST`, `PUT`, `PATCH` or `DELETE` requests, or to cross-site `fetch`/XHR calls. They are only sent on top-level `GET` navigations, and no `GET` endpoint changes state.
-- **Strict CORS**: only `CLIENT_ORIGIN` may make credentialed cross-origin calls, and every body is JSON (`application/json` is not a "simple" content type, so a cross-origin page cannot send one without a CORS preflight, which is refused). An HTML form cannot produce a JSON body the API accepts.
-
-Both rely on the frontend and API being **same-site**. With `SameSite=None` the first layer disappears, and a CSRF token or an `Origin` header check should be added.
-
-### Refresh tokens are stored only as SHA-256 hashes
-
-Each session is a document in the `refreshtokens` collection whose `_id` is the session id. The raw refresh token is never stored; only its SHA-256 hash is. Anyone who reads the database therefore cannot use the stored values to log in.
-
-SHA-256 is used instead of bcrypt because the two protect different things. bcrypt is deliberately slow to protect **low-entropy** secrets such as passwords from guessing. A refresh token is 320 bits of randomness, so there is nothing to guess, and a fast, **deterministic** hash lets the server find the session with a single indexed lookup (`tokenHash` has a unique index). bcrypt's random salt would make that lookup impossible.
-
-### Rotation and revocation
-
-- Every successful `/refresh` **rotates** the session: the old session is marked revoked (`revokedAt`) and a new session with a new random refresh token is created. Each refresh token therefore works only once.
-- The old session is revoked with a single conditional update (it must still be active), so if two requests refresh with the same token at the same moment, only one succeeds and the other gets `401`.
-- `POST /api/auth/logout` revokes the session, so its refresh token stops working.
-- A failed `/refresh` does not clear cookies, because another tab may already have stored newer ones.
-
-### Immediate logout via the session id
-
-The access token carries the session id (`sid`). On every authenticated request `authenticate` loads that session and rejects the request if it is missing, revoked or expired. Logging out and rotation therefore take effect **immediately**, without waiting up to 15 minutes for the access token to expire.
-
-The trade-off is one extra database lookup (by `_id`) per authenticated request, in exchange for real server-side revocation.
-
-### Cleanup of expired sessions
-
-`expiresAt` has a MongoDB **TTL index** (`expireAfterSeconds: 0`), so MongoDB deletes each session document automatically once it expires. Its background job runs about once a minute, which is why the code also checks `expiresAt` itself. Revoked sessions stay in the collection until they expire.
-
-### Logout is per device
-
-Each login is its own session. `POST /api/auth/logout` revokes only the session of the device that calls it; other logged-in devices stay logged in.
+- Each login is stored as a session in the `refreshtokens` collection, which keeps only the SHA-256 hash of the refresh token.
+- `authenticate` checks the session on every request, so logout takes effect immediately.
+- `POST /api/auth/refresh` rotates the session: the old refresh token is revoked and new cookies are set. Each refresh token works only once.
+- `POST /api/auth/logout` revokes the current session and clears both cookies.
+- Expired sessions are deleted automatically by a MongoDB TTL index.
 
 ### Roles
 
-- Roles are `USER` and `ADMIN`. The role is **always read from the database** on each request, never from the token, so a role change applies on the next request.
-- `authenticate` answers "who are you?" and returns **401** when the caller is not logged in. `authorize(...roles)` answers "may you do this?" and returns **403** when a logged-in user's role is not allowed.
-- Public registration **always** creates a `USER`; a `role` sent in the request body is ignored.
-- The only way to create an `ADMIN` is `npm run seed:admin` (see [Installation & Setup](#11-installation--setup)).
+- Roles are `USER` and `ADMIN`, read from the database on every request.
+- `authenticate` returns **401** when the caller is not logged in; `authorize(...roles)` returns **403** when the role is not allowed.
+- Registration always creates a `USER`. An `ADMIN` can only be created with `npm run seed:admin`.
 
-### Login and password rules
+### Passwords
 
-- Login returns the **same** `401 Invalid email or password` for an unknown email and for a wrong password, and takes about as long in both cases, so the endpoint cannot be used to find out which emails are registered.
-- Passwords must be **8–72 characters**. The upper limit exists because bcrypt only uses the first 72 bytes of a password; anything longer would be silently ignored. Passwords are hashed with bcrypt at cost 12.
+- 8–72 characters, hashed with bcrypt (cost 12).
+- Login returns the same `401 Invalid email or password` for an unknown email and a wrong password.
 
-### Session handling in the frontend
+### Frontend
 
-- **Who is logged in.** JavaScript cannot read the HttpOnly cookies, so the frontend asks the backend. When the app loads, `AuthProvider` (`src/context/AuthContext.jsx`) calls `GET /api/auth/me`: on success it stores the user (`id`, `name`, `email`, `role`), on failure the user stays `null`. `loading` is `true` until that answer arrives.
-- `useAuth()` exposes `user`, `loading`, `login(email, password)` (logs in, then calls `/auth/me`), `register(data)` (creates the account only; registering does not log in), `logout()` (forgets the user even if the logout call fails) and `clearUser()`.
-- **One-time refresh.** When a call returns `401` (except `/auth/login`, `/auth/refresh` and `/auth/logout`, where a `401` is a real answer), the API client calls `POST /auth/refresh` once and retries the original call once. If the refresh fails, the call throws a `401` (`Your session has expired. Please log in again.`) and the client tells `AuthContext` that the session is over. Reloading the page with an expired access token therefore keeps the user logged in.
-- **Shared in-flight refresh.** A refresh token works only once. If several calls get a `401` at the same time, they all wait for the same refresh (a module-level `refreshPromise`) instead of each starting their own; otherwise the second refresh would use an already-rotated token and log the user out.
-- **Route guards** (`src/components/`), both showing a loader while `loading` is `true`:
-  - `ProtectedRoute`, with an optional `role`: without a user it redirects to `/login`; with a user of the wrong role it redirects to that user's home page (`/requests` for a USER, `/admin/requests` for an ADMIN, from `HOME_PATHS` in `src/constants.js`).
-  - `PublicRoute`, for `/login` and `/register`: a logged-in user is redirected to their home page.
-
-The guards only decide what the frontend shows. The backend still checks every call (`401`, `403`, `404`).
+- On load, `AuthContext` calls `GET /api/auth/me` to find out who is logged in.
+- When a call returns `401`, the API client calls `POST /api/auth/refresh` once and retries. If the refresh fails, the user is logged out.
+- `ProtectedRoute` and `PublicRoute` redirect users by login state and role. The backend still checks every call.
 
 ## 8. Business Rules
 
