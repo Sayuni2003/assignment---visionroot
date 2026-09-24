@@ -1,4 +1,4 @@
-// Mirrors backend/src/constants/request.constants.js.
+// The request values below mirror backend/src/constants/request.constants.js.
 // The frontend uses these only to decide which options and actions to show.
 // The backend enforces every rule, so a hidden button is never the only protection.
 
@@ -33,4 +33,10 @@ export const LABELS = {
   IN_PROGRESS: 'In progress',
   RESOLVED: 'Resolved',
   CANCELLED: 'Cancelled',
+}
+
+// Where each role lands after logging in, or when it opens a page meant for the other role.
+export const HOME_PATHS = {
+  USER: '/requests',
+  ADMIN: '/admin/requests',
 }

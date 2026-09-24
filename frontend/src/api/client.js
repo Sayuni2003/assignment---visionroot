@@ -8,6 +8,13 @@ const NO_REFRESH_PATHS = ['/auth/login', '/auth/refresh', '/auth/logout']
 // so concurrent 401s must wait for this one refresh instead of each starting their own.
 let refreshPromise = null
 
+// Called when a refresh fails, i.e. the session is over. AuthContext sets it.
+let sessionExpiredHandler = null
+
+export function setSessionExpiredHandler(handler) {
+  sessionExpiredHandler = handler
+}
+
 function buildUrl(path, params = {}) {
   const query = new URLSearchParams()
 
@@ -87,6 +94,7 @@ export async function request(path, { method = 'GET', body, params } = {}) {
     const refreshed = await refreshSession()
 
     if (!refreshed) {
+      sessionExpiredHandler?.()
       throw createError(401, { message: 'Your session has expired. Please log in again.' })
     }
 

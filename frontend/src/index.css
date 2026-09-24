@@ -79,41 +79,6 @@ body {
   }
 }
 
-/* Existing app styles, mapped onto the palette above */
-@layer components {
-  .app {
-    @apply mx-auto max-w-160 px-4 py-12;
-  }
-
-  .app h1 {
-    @apply text-2xl font-semibold;
-  }
-
-  .app > p {
-    @apply mt-2 text-text-secondary;
-  }
-
-  .health {
-    @apply mt-8 space-y-3 rounded-lg border bg-bg-card px-5 py-4;
-  }
-
-  .health code {
-    @apply rounded-sm bg-bg-soft px-1.5 py-0.5 text-sm;
-  }
-
-  .health button {
-    @apply cursor-pointer rounded-md bg-primary px-4 py-2 font-medium text-white hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-60;
-  }
-
-  .ok {
-    @apply text-success;
-  }
-
-  .error {
-    @apply text-danger;
-  }
-}
-
 /* Hides the scrollbar on an overflow-x-auto element while keeping it scrollable */
 .scrollbar-hide {
   scrollbar-width: none;
