@@ -20,7 +20,7 @@ export function canTransition(from, to) {
   return Object.hasOwn(ALLOWED_TRANSITIONS, from) && ALLOWED_TRANSITIONS[from].includes(to)
 }
 
-// Display text for every category, priority and status value.
+// Display text for every category, priority, status and role value.
 export const LABELS = {
   TECHNICAL: 'Technical',
   BILLING: 'Billing',
@@ -33,6 +33,8 @@ export const LABELS = {
   IN_PROGRESS: 'In progress',
   RESOLVED: 'Resolved',
   CANCELLED: 'Cancelled',
+  USER: 'User',
+  ADMIN: 'Admin',
 }
 
 // Where each role lands after logging in, or when it opens a page meant for the other role.
