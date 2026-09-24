@@ -1,38 +1,113 @@
+@import "tailwindcss";
+
+@theme {
+  /* Brand */
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+
+  /* Semantic colors */
+  --color-danger: #dc2626;
+  --color-success: #16a34a;
+  --color-warning: #d97706;
+
+  /* Backgrounds */
+  --color-bg-main: #f8fafc;
+  --color-bg-card: #ffffff;
+  --color-bg-soft: #f1f5f9;
+  --color-bg-nav: #ffffff;
+
+  /* Text */
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #64748b;
+  --color-text-muted: #94a3b8;
+
+  /* Borders */
+  --color-border: #e2e8f0;
+  --color-divider: #f1f5f9;
+
+  /* Role tints */
+  --color-primary-soft: #dbeafe;
+  --color-danger-soft: #fee2e2;
+  --color-success-soft: #dcfce7;
+  --color-warning-soft: #fef3c7;
+
+  /* Ticket statuses */
+  --color-status-pending: #7c3aed;
+  --color-status-pending-soft: #ede9fe;
+  --color-status-in-progress: #d97706;
+  --color-status-in-progress-soft: #fef3c7;
+  --color-status-resolved: #16a34a;
+  --color-status-resolved-soft: #dcfce7;
+  --color-status-cancelled: #475569;
+  --color-status-cancelled-soft: #f1f5f9;
+
+  /* Ticket priorities */
+  --color-priority-low: #0d9488;
+  --color-priority-low-soft: #ccfbf1;
+  --color-priority-medium: #ca8a04;
+  --color-priority-medium-soft: #fef9c3;
+  --color-priority-high: #ea580c;
+  --color-priority-high-soft: #ffedd5;
+
+  /* Radius */
+  --radius: 0.625rem;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
 :root {
-  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  line-height: 1.5;
-  color: #1f2937;
-  background-color: #f9fafb;
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
 }
 
 body {
-  margin: 0;
+  @apply bg-bg-main text-text-primary m-0;
 }
 
-.app {
-  max-width: 640px;
-  margin: 0 auto;
-  padding: 3rem 1rem;
+@layer base {
+  * {
+    @apply border-border outline-primary/50;
+  }
+
+  a {
+    @apply text-primary hover:text-primary-hover;
+  }
+
+  /* A clear keyboard focus ring on every interactive element */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-primary;
+  }
 }
 
-.health {
-  margin-top: 2rem;
-  padding: 1rem 1.25rem;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  background-color: #fff;
-}
+/* Shared building blocks, so buttons and form fields look the same everywhere */
+@layer components {
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center rounded-md px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60;
+  }
 
-button {
-  padding: 0.5rem 1rem;
-  font: inherit;
-  cursor: pointer;
-}
+  /* bg-card is the palette's white, used here as the text colour on the primary button */
+  .btn-primary {
+    @apply bg-primary text-bg-card hover:bg-primary-hover hover:text-bg-card;
+  }
 
-.ok {
-  color: #047857;
-}
+  .btn-secondary {
+    @apply border bg-bg-card text-text-primary hover:bg-bg-soft hover:text-text-primary;
+  }
 
-.error {
-  color: #b91c1c;
+  .form-label {
+    @apply mb-1 block text-sm font-medium text-text-primary;
+  }
+
+  .form-input {
+    @apply block w-full rounded-md border bg-bg-card px-3 py-2 text-sm text-text-primary aria-[invalid=true]:border-danger;
+  }
+
+  .form-error {
+    @apply mt-1 text-sm text-danger;
+  }
 }
