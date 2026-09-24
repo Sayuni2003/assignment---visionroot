@@ -17,7 +17,7 @@ const router = Router();
 router.use(authenticate);
 
 router.get('/', list);
-router.post('/', create);
+router.post('/', authorize('USER'), create);
 router.get('/:id', getById);
 router.patch('/:id', authorize('USER'), update);
 // Cancels the request (status becomes CANCELLED); the document is never deleted.
