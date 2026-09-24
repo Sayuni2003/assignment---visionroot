@@ -4,7 +4,7 @@
 
 A full-stack web application for managing service requests. Users with the **USER** role will be able to submit and track their own service requests, and users with the **ADMIN** role will be able to review them and move them through a status workflow.
 
-The project is being built incrementally. The current state is the **project foundation only**: a React frontend and an Express REST API connected to MongoDB, with a health-check endpoint. Authentication, roles, and service request features have not been implemented yet.
+The project is being built incrementally. The current state is the **project foundation plus backend authentication and authorization**: a React frontend and an Express REST API connected to MongoDB, with a health-check endpoint, registration and login, cookie-based JWT sessions, and USER/ADMIN roles. Service request features and the frontend login screens have not been implemented yet.
 
 ## Current Technology Stack
 
@@ -25,10 +25,18 @@ Language: JavaScript
 
 - **`frontend/`**: the React client. `src/services/` holds the code that calls the API. For now the page only shows the configured API URL and has a button that calls the health endpoint.
 - **`backend/`**: the Express API.
-  - `src/app.js` sets up Express: middleware, routes, and error handling.
-  - `src/server.js` loads environment variables, connects to MongoDB, and starts the HTTP server.
+  - `src/app.js` sets up Express: middleware, routes, and error handling. It does not connect to the database or listen on a port, so tests can import it directly.
+  - `src/server.js` connects to MongoDB and starts the HTTP server.
+  - `src/config/env.js` loads `backend/.env` and validates every environment variable (see [Configuration](#configuration)).
   - `src/config/database.js` holds the MongoDB connection logic.
   - `src/middleware/error.middleware.js` contains the 404 handler and the central error handler.
+  - `src/middleware/auth.middleware.js` contains `authenticate` (who is calling) and `authorize` (which roles may call).
+  - `src/models/` holds the Mongoose models: `User` and `RefreshToken` (one document per login session).
+  - `src/validators/` holds plain request-validation functions.
+  - `src/services/auth.service.js` holds the registration, login, refresh and logout logic.
+  - `src/controllers/` and `src/routes/` hold thin HTTP handlers and route definitions.
+  - `src/utils/` holds `AppError`, token helpers (`tokens.js`) and auth cookie helpers (`cookies.js`).
+  - `src/scripts/seed-admin.js` creates the first ADMIN account.
 
 ## Local Setup
 
@@ -70,12 +78,26 @@ On Windows (PowerShell), use `Copy-Item` in place of `cp`.
 
 Backend variables (`backend/.env`):
 
-| Variable        | Description                                               | Example                                                   |
-| --------------- | --------------------------------------------------------- | --------------------------------------------------------- |
-| `PORT`          | Port the API listens on                                   | `5000`                                                    |
-| `NODE_ENV`      | `development` or `production`                             | `development`                                             |
-| `MONGODB_URI`   | MongoDB connection string (**required**)                  | `mongodb://localhost:27017/visionroot_service_management` |
-| `CLIENT_ORIGIN` | Frontend origin allowed by CORS (**required**)            | `http://localhost:5173`                                   |
+| Variable | Description | Default | Example |
+| -------- | ----------- | ------- | ------- |
+| `PORT` | Port the API listens on | `5000` | `5000` |
+| `NODE_ENV` | `development` enables stack traces in error responses; `production` makes cookies `Secure`. Anything else, including unset, gets neither. | unset | `development` |
+| `MONGODB_URI` | MongoDB connection string | **required** | `mongodb://localhost:27017/visionroot_service_management` |
+| `CLIENT_ORIGIN` | Frontend origin allowed by CORS | **required** | `http://localhost:5173` |
+| `JWT_ACCESS_SECRET` | Secret used to sign access tokens; use a long random string | **required** | `replace-with-a-long-random-string` |
+| `ACCESS_TOKEN_EXPIRES_MINUTES` | Access token lifetime in minutes (used for both the JWT and its cookie) | `15` | `15` |
+| `REFRESH_TOKEN_EXPIRES_DAYS` | Refresh token and session lifetime in days | `7` | `7` |
+| `SEED_ADMIN_NAME` | Name of the admin created by `npm run seed:admin` | seed only | `System Admin` |
+| `SEED_ADMIN_EMAIL` | Email of that admin | seed only | `admin@example.com` |
+| `SEED_ADMIN_PASSWORD` | Password of that admin (8–72 characters) | seed only | `replace-with-a-strong-password` |
+
+Numeric variables must be whole numbers greater than zero; leaving one unset or empty uses its default.
+
+Generate a secret with:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+```
 
 Frontend variables (`frontend/.env`):
 
@@ -98,7 +120,16 @@ npm run dev     # development, restarts automatically on changes (nodemon)
 npm start       # plain node
 ```
 
-The API runs at `http://localhost:5000`. If `MONGODB_URI` or `CLIENT_ORIGIN` is missing, or MongoDB is unreachable, the server logs the reason and exits.
+The API runs at `http://localhost:5000`. If any environment variable is missing or invalid, the server lists every problem in one message and exits; it also exits if MongoDB is unreachable.
+
+### 6a. Create the admin account (once)
+
+```bash
+cd backend
+npm run seed:admin
+```
+
+This creates an ADMIN user from the `SEED_ADMIN_*` variables. Running it again is safe: if the email already exists, it logs that and exits without changes.
 
 ### 7. Start the frontend
 
@@ -107,11 +138,48 @@ cd frontend
 npm run dev
 ```
 
-Open `http://localhost:5173` and click **Check API health** to confirm the frontend can reach the backend.
+Open `http://localhost:5173` and click **Check API health** to confirm the frontend can reach the backend. Use `localhost`, not `127.0.0.1`, so the origin matches `CLIENT_ORIGIN` (see [Frontend and API on the same site](#frontend-and-api-on-the-same-site)).
+
+## Configuration
+
+All environment variables are read in one place, `backend/src/config/env.js`, which exports a frozen `config` object (for example `config.jwt.accessSecret`, `config.refreshToken.expiresDays`, `config.isDevelopment`). No other module reads `process.env`; the only exception is the seed script, which reads the `SEED_ADMIN_*` variables it alone uses.
+
+- `env.js` loads `backend/.env` (via `dotenv`, which never overrides variables that are already set) and validates everything **when it is first imported**. Required strings must be non-empty and numbers must be positive integers. If anything is wrong it prints every problem and exits with code 1, for example:
+
+  ```text
+  Invalid environment configuration (see backend/.env.example):
+    - CLIENT_ORIGIN is required
+    - JWT_ACCESS_SECRET is required
+  ```
+
+- `config.isDevelopment` is strictly `NODE_ENV === 'development'`, and `config.isProduction` is strictly `NODE_ENV === 'production'`.
+- `app.js` never connects to the database or starts a server. Tests can import it directly, but must provide valid environment variables (at least `MONGODB_URI`, `CLIENT_ORIGIN` and `JWT_ACCESS_SECRET`) **before** the first import, for example in the test runner's setup file; otherwise `env.js` exits the test process.
+
+## Frontend and API on the same site
+
+In development the frontend (`http://localhost:5173`) calls the API directly at `http://localhost:5000/api`. These are different origins but the **same site** (ports do not count for cookies), so the `SameSite=Lax` auth cookies are sent, and CORS allows `CLIENT_ORIGIN` with credentials. Two rules follow from this:
+
+- Every API request must include credentials (`fetch(url, { credentials: 'include' })` or axios `withCredentials: true`); otherwise the browser neither stores nor sends the auth cookies.
+- Open the app at `http://localhost:5173`, not `http://127.0.0.1:5173`. `127.0.0.1` and `localhost` are different sites, so the cookies would not be sent and CORS would reject the request.
+
+**Production must keep the frontend and the API same-site too**, for example by serving the API under `/api` on the frontend's domain through a rewrite or reverse proxy. If they must live on different sites, the cookies need `SameSite=None` together with `Secure` (see `backend/src/utils/cookies.js`), and CSRF protection has to be revisited (see [CSRF](#csrf)).
 
 ## Current API
 
 Base URL: `http://localhost:5000/api`
+
+### Response shapes
+
+Every endpoint follows one convention:
+
+| Kind | Shape |
+| ---- | ----- |
+| Single resource | `{ "success": true, "data": { "<name>": { ... } } }`, e.g. `data: { user }` |
+| List | `{ "success": true, "data": [ ... ], "pagination"?: { ... } }` (no endpoint paginates yet) |
+| Action with no resource | `{ "success": true, "message": "..." }`, e.g. health check, logout |
+| Error | `{ "success": false, "message": "...", "errors"?: { "<field>": "..." } }` |
+
+A success response may also carry a human-readable `message` (for example register's `"Registration successful"`). Stack traces are added to error responses only when `NODE_ENV=development`.
 
 ### `GET /api/health`
 
@@ -140,3 +208,173 @@ Unknown routes return `404 Not Found`:
   "message": "Route not found: GET /api/does-not-exist"
 }
 ```
+
+### Error responses
+
+Every error uses the same shape. `errors` is only present when there are per-field details:
+
+```json
+{
+  "success": false,
+  "message": "Validation failed",
+  "errors": { "email": "A valid email is required" }
+}
+```
+
+| Situation                          | Status | Message                    |
+| ---------------------------------- | ------ | -------------------------- |
+| Validation failed                  | 400    | `Validation failed`        |
+| Malformed JSON body                | 400    | `Malformed JSON`           |
+| Invalid MongoDB id                 | 400    | `Invalid ID`               |
+| Not authenticated                  | 401    | depends on the reason      |
+| Authenticated but role not allowed | 403    | `You do not have permission to perform this action` |
+| Unknown route                      | 404    | `Route not found: ...`     |
+| Duplicate value (e.g. email)       | 409    | depends on the field       |
+| Request body larger than 10 kB     | 413    | `Request body too large`   |
+| Anything unexpected                | 500    | `Internal server error`    |
+
+Unexpected errors are logged on the server. Stack traces are only included in responses when `NODE_ENV=development`.
+
+### Auth endpoints (`/api/auth`)
+
+All request bodies are JSON. Tokens are **never** returned in response bodies; they are only set as HttpOnly cookies, so a browser client must send requests with credentials (`fetch(..., { credentials: 'include' })` or `axios` with `withCredentials: true`).
+
+#### `POST /api/auth/register`
+
+Creates a **USER** account. Does not log in and sets no cookies. Any `role` field in the body is ignored.
+
+```json
+{ "name": "Jane Doe", "email": "jane@example.com", "password": "at-least-8-chars" }
+```
+
+| Status | When |
+| ------ | ---- |
+| `201`  | Created. Body: `{ "success": true, "message": "Registration successful", "data": { "user": { "id", "name", "email", "role", "createdAt", "updatedAt" } } }` |
+| `400`  | Validation failed (name 2–50 characters after trimming, valid email, password 8–72 characters) |
+| `409`  | `Email is already registered` (emails are case-insensitive) |
+
+#### `POST /api/auth/login`
+
+```json
+{ "email": "jane@example.com", "password": "at-least-8-chars" }
+```
+
+| Status | When |
+| ------ | ---- |
+| `200`  | Sets the `accessToken` and `refreshToken` cookies. Body: `{ "success": true, "data": { "user": { ... } } }` |
+| `400`  | Email or password missing |
+| `401`  | `Invalid email or password` (the same for an unknown email and a wrong password) |
+
+#### `POST /api/auth/refresh`
+
+No body. Reads the `refreshToken` cookie, rotates the session, and sets new `accessToken` and `refreshToken` cookies.
+
+| Status | When |
+| ------ | ---- |
+| `200`  | New cookies set. Body: `{ "success": true, "data": { "user": { ... } } }` |
+| `401`  | `Refresh token required` (no cookie) or `Invalid or expired refresh token` (unknown, expired, logged out, or already used). Cookies are left unchanged; the client should send the user to log in. |
+
+#### `POST /api/auth/logout`
+
+No body and no valid access token needed (it may already have expired). Revokes the session behind the `refreshToken` cookie, if any, and clears both cookies.
+
+| Status | When |
+| ------ | ---- |
+| `200`  | Always. Body: `{ "success": true, "message": "Logged out" }` |
+
+#### `GET /api/auth/me`
+
+Returns the logged-in user.
+
+| Status | When |
+| ------ | ---- |
+| `200`  | Body: `{ "success": true, "data": { "user": { "id", "name", "email", "role" } } }` |
+| `401`  | Not logged in, access token invalid or expired, or session revoked |
+
+### User endpoints (`/api/users`)
+
+#### `GET /api/users` (ADMIN only)
+
+Lists all users, newest first. No pagination yet.
+
+| Status | When |
+| ------ | ---- |
+| `200`  | Body: `{ "success": true, "data": [ { "id", "name", "email", "role", "createdAt", "updatedAt" }, ... ] }` |
+| `401`  | Not logged in |
+| `403`  | Logged in, but not an ADMIN |
+
+## Authentication & Authorization
+
+### Access and refresh tokens
+
+Logging in creates a **session** and issues two tokens:
+
+- **Access token**: a JWT signed with `JWT_ACCESS_SECRET`, valid for **15 minutes** (`ACCESS_TOKEN_EXPIRES_MINUTES`, which sets both the JWT expiry and the cookie's `Max-Age`). It is sent with every request and proves who the caller is. It contains only the user id (`sub`) and the session id (`sid`), not the role.
+- **Refresh token**: a random 80-character hex string (40 random bytes from Node's `crypto`), valid for **7 days** (`REFRESH_TOKEN_EXPIRES_DAYS`). It is only used to get a new access token from `POST /api/auth/refresh`.
+
+The split keeps the token that travels on every request short-lived, while the user still stays logged in for a week. When an access token expires the client calls `/refresh` and retries.
+
+### Why HttpOnly cookies
+
+Both tokens are stored in `HttpOnly` cookies, never in `localStorage` or response bodies. JavaScript on the page cannot read HttpOnly cookies, so an XSS bug cannot steal the tokens. The cookies are `SameSite=Lax`, and `Secure` when `NODE_ENV=production` so they are only sent over HTTPS.
+
+The access token cookie has `Path=/`. The refresh token cookie has `Path=/api/auth`, so the browser only sends it to the auth endpoints (refresh and logout) and not with every API call. This limits where the long-lived token is exposed.
+
+If the frontend and API are deployed on different sites (different registrable domains), browsers will not send `SameSite=Lax` cookies with cross-site API calls. Keep them same-site (see [Frontend and API on the same site](#frontend-and-api-on-the-same-site)), or switch to `SameSite=None` together with `Secure` (see `src/utils/cookies.js`).
+
+### CSRF
+
+Cookie authentication is exposed to cross-site request forgery: a malicious page makes the victim's browser send a request that automatically carries their cookies. Two layers prevent this without a separate CSRF token:
+
+- **`SameSite=Lax`**: browsers do not attach the cookies to cross-site `POST`, `PUT`, `PATCH` or `DELETE` requests, or to cross-site `fetch`/XHR calls. They are only sent on top-level `GET` navigations, and no `GET` endpoint changes state.
+- **Strict CORS**: only `CLIENT_ORIGIN` may make credentialed cross-origin calls, and every body is JSON (`application/json` is not a "simple" content type, so a cross-origin page cannot send one without a CORS preflight, which is refused). An HTML form cannot produce a JSON body the API accepts.
+
+Both rely on the frontend and API being **same-site**. With `SameSite=None` the first layer disappears, and a CSRF token or an `Origin` header check should be added.
+
+### Refresh tokens are stored only as SHA-256 hashes
+
+Each session is a document in the `refreshtokens` collection whose `_id` is the session id. The raw refresh token is never stored; only its SHA-256 hash is. Anyone who reads the database therefore cannot use the stored values to log in.
+
+SHA-256 is used instead of bcrypt because the two protect different things. bcrypt is deliberately slow to protect **low-entropy** secrets such as passwords from guessing. A refresh token is 320 bits of randomness, so there is nothing to guess, and a fast, **deterministic** hash lets the server find the session with a single indexed lookup (`tokenHash` has a unique index). bcrypt's random salt would make that lookup impossible.
+
+### Rotation and revocation
+
+- Every successful `/refresh` **rotates** the session: the old session is marked revoked (`revokedAt`) and a new session with a new random refresh token is created. Each refresh token therefore works only once.
+- The old session is revoked with a single conditional update (it must still be active), so if two requests refresh with the same token at the same moment, only one succeeds and the other gets `401`.
+- `POST /api/auth/logout` revokes the session, so its refresh token stops working.
+- A failed `/refresh` does not clear cookies, because another tab may already have stored newer ones.
+
+### Immediate logout via the session id
+
+The access token carries the session id (`sid`). On every authenticated request `authenticate` loads that session and rejects the request if it is missing, revoked or expired. Logging out and rotation therefore take effect **immediately**, without waiting up to 15 minutes for the access token to expire.
+
+The trade-off is one extra database lookup (by `_id`) per authenticated request, in exchange for real server-side revocation.
+
+### Cleanup of expired sessions
+
+`expiresAt` has a MongoDB **TTL index** (`expireAfterSeconds: 0`), so MongoDB deletes each session document automatically once it expires. Its background job runs about once a minute, which is why the code also checks `expiresAt` itself. Revoked sessions stay in the collection until they expire.
+
+### Logout is per device
+
+Each login is its own session. `POST /api/auth/logout` revokes only the session of the device that calls it; other logged-in devices stay logged in.
+
+### Roles
+
+- Roles are `USER` and `ADMIN`. The role is **always read from the database** on each request, never from the token, so a role change applies on the next request.
+- `authenticate` answers "who are you?" and returns **401** when the caller is not logged in. `authorize(...roles)` answers "may you do this?" and returns **403** when a logged-in user's role is not allowed.
+- Public registration **always** creates a `USER`; a `role` sent in the request body is ignored.
+- The only way to create an `ADMIN` is `npm run seed:admin` (see Local Setup).
+
+### Login and password rules
+
+- Login returns the **same** `401 Invalid email or password` for an unknown email and for a wrong password, and takes about as long in both cases, so the endpoint cannot be used to find out which emails are registered.
+- Passwords must be **8–72 characters**. The upper limit exists because bcrypt only uses the first 72 bytes of a password; anything longer would be silently ignored. Passwords are hashed with bcrypt at cost 12.
+
+### Known limitations
+
+- Refresh-token theft is not detected (no reuse detection); planned as a future improvement.
+
+### Future improvements
+
+- **Log out of all devices**: revoke every active session of the user.
+- **Rate limiting** on `/login` and `/refresh` to slow down password guessing and token abuse.
