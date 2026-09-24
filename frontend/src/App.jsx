@@ -1,8 +1,10 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import Layout from './components/Layout.jsx'
 import ProtectedRoute from './components/ProtectedRoute.jsx'
 import PublicRoute from './components/PublicRoute.jsx'
 import { HOME_PATHS } from './constants.js'
 import { AuthProvider, useAuth } from './context/AuthContext.jsx'
+import { ToastProvider } from './context/ToastContext.jsx'
 import AdminRequestsPage from './pages/AdminRequestsPage.jsx'
 import AdminUsersPage from './pages/AdminUsersPage.jsx'
 import EditRequestPage from './pages/EditRequestPage.jsx'
@@ -23,30 +25,35 @@ function App() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <Routes>
-          <Route element={<PublicRoute />}>
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/register" element={<RegisterPage />} />
-          </Route>
+        <ToastProvider>
+          <Routes>
+            <Route element={<PublicRoute />}>
+              <Route path="/login" element={<LoginPage />} />
+              <Route path="/register" element={<RegisterPage />} />
+            </Route>
 
-          <Route element={<ProtectedRoute />}>
-            <Route path="/" element={<HomeRedirect />} />
-            <Route path="/requests/:id" element={<RequestDetailsPage />} />
-          </Route>
+            {/* Every logged-in page shares the Layout; the inner guards add the role checks. */}
+            <Route element={<ProtectedRoute />}>
+              <Route element={<Layout />}>
+                <Route path="/" element={<HomeRedirect />} />
+                <Route path="/requests/:id" element={<RequestDetailsPage />} />
 
-          <Route element={<ProtectedRoute role="USER" />}>
-            <Route path="/requests" element={<MyRequestsPage />} />
-            <Route path="/requests/new" element={<NewRequestPage />} />
-            <Route path="/requests/:id/edit" element={<EditRequestPage />} />
-          </Route>
+                <Route element={<ProtectedRoute role="USER" />}>
+                  <Route path="/requests" element={<MyRequestsPage />} />
+                  <Route path="/requests/new" element={<NewRequestPage />} />
+                  <Route path="/requests/:id/edit" element={<EditRequestPage />} />
+                </Route>
 
-          <Route element={<ProtectedRoute role="ADMIN" />}>
-            <Route path="/admin/requests" element={<AdminRequestsPage />} />
-            <Route path="/admin/users" element={<AdminUsersPage />} />
-          </Route>
+                <Route element={<ProtectedRoute role="ADMIN" />}>
+                  <Route path="/admin/requests" element={<AdminRequestsPage />} />
+                  <Route path="/admin/users" element={<AdminUsersPage />} />
+                </Route>
+              </Route>
+            </Route>
 
-          <Route path="*" element={<NotFoundPage />} />
-        </Routes>
+            <Route path="*" element={<NotFoundPage />} />
+          </Routes>
+        </ToastProvider>
       </AuthProvider>
     </BrowserRouter>
   )

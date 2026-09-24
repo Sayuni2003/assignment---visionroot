@@ -1,8 +1,8 @@
 function NewRequestPage() {
   return (
-    <main className="mx-auto max-w-5xl px-4 py-8">
+    <div>
       <h1 className="text-2xl font-semibold">New request</h1>
-    </main>
+    </div>
   )
 }
 

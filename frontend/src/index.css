@@ -77,6 +77,39 @@ body {
   a {
     @apply text-primary hover:text-primary-hover;
   }
+
+  /* A clear keyboard focus ring on every interactive element */
+  :focus-visible {
+    @apply outline-2 outline-offset-2 outline-primary;
+  }
+}
+
+/* Shared building blocks, so buttons and form fields look the same everywhere */
+@layer components {
+  .btn {
+    @apply inline-flex cursor-pointer items-center justify-center rounded-md px-4 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-60;
+  }
+
+  /* bg-card is the palette's white, used here as the text colour on the primary button */
+  .btn-primary {
+    @apply bg-primary text-bg-card hover:bg-primary-hover hover:text-bg-card;
+  }
+
+  .btn-secondary {
+    @apply border bg-bg-card text-text-primary hover:bg-bg-soft hover:text-text-primary;
+  }
+
+  .form-label {
+    @apply mb-1 block text-sm font-medium text-text-primary;
+  }
+
+  .form-input {
+    @apply block w-full rounded-md border bg-bg-card px-3 py-2 text-sm text-text-primary aria-[invalid=true]:border-danger;
+  }
+
+  .form-error {
+    @apply mt-1 text-sm text-danger;
+  }
 }
 
 /* Hides the scrollbar on an overflow-x-auto element while keeping it scrollable */
