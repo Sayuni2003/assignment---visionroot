@@ -12,6 +12,10 @@ async function start() {
       throw new Error('CLIENT_ORIGIN is not defined. Add it to backend/.env (see .env.example).');
     }
 
+    if (!process.env.JWT_ACCESS_SECRET) {
+      throw new Error('JWT_ACCESS_SECRET is not defined. Add it to backend/.env (see .env.example).');
+    }
+
     await connectDatabase();
 
     app.listen(PORT, () => {
