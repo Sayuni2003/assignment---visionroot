@@ -6,8 +6,11 @@ import ErrorMessage from '../components/ErrorMessage.jsx'
 import Loader from '../components/Loader.jsx'
 import RequestForm from '../components/RequestForm.jsx'
 import { useToast } from '../context/ToastContext.jsx'
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js'
 
 function EditRequestPage() {
+  useDocumentTitle('Edit request')
+
   const { id } = useParams()
   const navigate = useNavigate()
   const { showSuccess } = useToast()

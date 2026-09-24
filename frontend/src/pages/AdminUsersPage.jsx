@@ -4,12 +4,15 @@ import EmptyState from '../components/EmptyState.jsx'
 import ErrorMessage from '../components/ErrorMessage.jsx'
 import Loader from '../components/Loader.jsx'
 import RoleBadge from '../components/RoleBadge.jsx'
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js'
 
 function formatDate(value) {
   return new Date(value).toLocaleDateString()
 }
 
 function AdminUsersPage() {
+  useDocumentTitle('Users')
+
   const [users, setUsers] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -51,7 +54,7 @@ function AdminUsersPage() {
           {users.map((user) => (
             <li key={user.id} className="rounded-lg border bg-bg-card p-4">
               <div className="flex items-start justify-between gap-3">
-                <p className="font-medium break-words">{user.name}</p>
+                <p className="min-w-0 font-medium break-words">{user.name}</p>
                 <RoleBadge role={user.role} />
               </div>
               <p className="mt-1 text-sm break-all text-text-secondary">{user.email}</p>

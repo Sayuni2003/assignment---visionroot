@@ -20,7 +20,7 @@ export function AuthProvider({ children }) {
   // Expired sessions: when a refresh fails, client.js calls this and we forget the user.
   // ProtectedRoute then sees no user and redirects to /login, so pages never handle 401s themselves.
   useEffect(() => {
-    setSessionExpiredHandler(() => setUser(null))
+    setSessionExpiredHandler(clearUser)
     return () => setSessionExpiredHandler(null)
   }, [])
 

@@ -10,6 +10,7 @@ import StatusBadge from '../components/StatusBadge.jsx'
 import StatusUpdateForm from '../components/StatusUpdateForm.jsx'
 import { HOME_PATHS, LABELS } from '../constants.js'
 import { useAuth } from '../context/AuthContext.jsx'
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js'
 
 function formatDateTime(value) {
   return new Date(value).toLocaleString()
@@ -17,6 +18,8 @@ function formatDateTime(value) {
 
 // Shared by USER (their own requests) and ADMIN (any request); the actions depend on the role.
 function RequestDetailsPage() {
+  useDocumentTitle('Request details')
+
   const { id } = useParams()
   const { user } = useAuth()
   const [request, setRequest] = useState(null)
@@ -103,7 +106,7 @@ function RequestDetailsPage() {
           {isAdmin && (
             <div>
               <dt className="text-sm text-text-secondary">Owner</dt>
-              <dd className="mt-1 break-words">
+              <dd className="mt-1 wrap-anywhere">
                 {request.createdBy?.name ?? 'Unknown'}
                 <span className="block text-sm text-text-secondary">{request.createdBy?.email}</span>
               </dd>

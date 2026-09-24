@@ -18,7 +18,7 @@ function ToastList({ toasts, onDismiss }) {
           key={toast.id}
           className={`flex items-start justify-between gap-3 rounded-md border border-l-4 px-4 py-3 text-sm text-text-primary ${TYPE_CLASSES[toast.type]}`}
         >
-          <p>{toast.message}</p>
+          <p className="min-w-0 break-words">{toast.message}</p>
           <button
             type="button"
             onClick={() => onDismiss(toast.id)}

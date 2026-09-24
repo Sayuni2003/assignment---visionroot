@@ -4,6 +4,7 @@ import AuthCard from '../components/AuthCard.jsx'
 import ErrorMessage from '../components/ErrorMessage.jsx'
 import { useAuth } from '../context/AuthContext.jsx'
 import { useToast } from '../context/ToastContext.jsx'
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js'
 
 // The same pattern the backend uses in validateRegister.
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -38,6 +39,8 @@ function validate(values) {
 }
 
 function RegisterPage() {
+  useDocumentTitle('Create an account')
+
   const { register } = useAuth()
   const { showSuccess } = useToast()
   const navigate = useNavigate()

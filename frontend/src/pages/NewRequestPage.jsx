@@ -2,8 +2,11 @@ import { Link, useNavigate } from 'react-router-dom'
 import { createRequest } from '../api/requests.api.js'
 import RequestForm from '../components/RequestForm.jsx'
 import { useToast } from '../context/ToastContext.jsx'
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js'
 
 function NewRequestPage() {
+  useDocumentTitle('New request')
+
   const navigate = useNavigate()
   const { showSuccess } = useToast()
 

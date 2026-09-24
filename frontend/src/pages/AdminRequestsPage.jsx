@@ -7,6 +7,7 @@ import Loader from '../components/Loader.jsx'
 import Pagination from '../components/Pagination.jsx'
 import RequestList from '../components/RequestList.jsx'
 import { CATEGORIES, PRIORITIES, STATUSES } from '../constants.js'
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js'
 
 const PAGE_SIZE = 10
 
@@ -21,6 +22,8 @@ const SORT_OPTIONS = [
 const DEFAULT_FILTERS = { search: '', status: '', category: '', priority: '', sort: 'newest' }
 
 function AdminRequestsPage() {
+  useDocumentTitle('All Requests')
+
   const [filters, setFilters] = useState(DEFAULT_FILTERS)
   // What is typed in the search box; it only becomes filters.search when the search is submitted.
   const [searchInput, setSearchInput] = useState('')

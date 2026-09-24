@@ -75,7 +75,7 @@ function Navbar() {
           </ul>
 
           <div className="flex items-center justify-between gap-4">
-            <span className="text-sm text-text-secondary">{user.name}</span>
+            <span className="min-w-0 text-sm break-words text-text-secondary">{user.name}</span>
             <button type="button" className="btn btn-secondary" onClick={handleLogout}>
               Log out
             </button>

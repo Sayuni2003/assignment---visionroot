@@ -6,10 +6,13 @@ import ErrorMessage from '../components/ErrorMessage.jsx'
 import Loader from '../components/Loader.jsx'
 import Pagination from '../components/Pagination.jsx'
 import RequestList from '../components/RequestList.jsx'
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js'
 
 const PAGE_SIZE = 10
 
 function MyRequestsPage() {
+  useDocumentTitle('My Requests')
+
   const [page, setPage] = useState(1)
   const [requests, setRequests] = useState([])
   const [pagination, setPagination] = useState(null)

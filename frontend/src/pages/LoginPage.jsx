@@ -4,6 +4,7 @@ import AuthCard from '../components/AuthCard.jsx'
 import ErrorMessage from '../components/ErrorMessage.jsx'
 import { HOME_PATHS } from '../constants.js'
 import { useAuth } from '../context/AuthContext.jsx'
+import { useDocumentTitle } from '../hooks/useDocumentTitle.js'
 
 // Same checks as validateLogin in the backend: both fields must be filled in.
 function validate(values) {
@@ -21,6 +22,8 @@ function validate(values) {
 }
 
 function LoginPage() {
+  useDocumentTitle('Log in')
+
   const { login } = useAuth()
   const navigate = useNavigate()
   const [values, setValues] = useState({ email: '', password: '' })
