@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import mongoose from 'mongoose';
 
 import { connectDatabase } from '../config/database.js';
@@ -9,6 +8,8 @@ import { validateRegister } from '../validators/auth.validator.js';
 // Creates the first ADMIN account. Public registration only ever creates USER accounts,
 // so this script is the only way to get an admin. Safe to run repeatedly.
 async function seedAdmin() {
+  // The seed variables are only used here, so they are read here rather than in config/env.js.
+  // backend/.env has already been loaded by config/env.js (imported via database.js).
   const { SEED_ADMIN_NAME, SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD } = process.env;
   const missing = Object.entries({ SEED_ADMIN_NAME, SEED_ADMIN_EMAIL, SEED_ADMIN_PASSWORD })
     .filter(([, value]) => !value)

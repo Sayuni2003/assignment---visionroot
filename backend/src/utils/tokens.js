@@ -1,7 +1,11 @@
 import crypto from 'node:crypto';
 import jwt from 'jsonwebtoken';
 
-const DAY_MS = 24 * 60 * 60 * 1000;
+import { config } from '../config/env.js';
+
+// Single source for both lifetimes: used for the token/session expiry and the cookie maxAge.
+export const ACCESS_TOKEN_TTL_MS = config.jwt.accessTokenExpiresMinutes * 60 * 1000;
+export const REFRESH_TOKEN_TTL_MS = config.refreshToken.expiresDays * 24 * 60 * 60 * 1000;
 
 // Refresh tokens are opaque random strings; only their hash is ever stored.
 export function generateRefreshToken() {
@@ -17,23 +21,12 @@ export function hashToken(token) {
 // The role is deliberately left out: authenticate() reads it from the database on every request,
 // so a role change takes effect immediately instead of when the token expires.
 export function signAccessToken(user, sessionId) {
-  return jwt.sign({ sub: String(user.id), sid: String(sessionId) }, process.env.JWT_ACCESS_SECRET, {
+  return jwt.sign({ sub: String(user.id), sid: String(sessionId) }, config.jwt.accessSecret, {
     algorithm: 'HS256',
-    expiresIn: process.env.ACCESS_TOKEN_EXPIRES_IN || '15m',
+    expiresIn: config.jwt.accessTokenExpiresMinutes * 60, // seconds
   });
 }
 
 export function verifyAccessToken(token) {
-  return jwt.verify(token, process.env.JWT_ACCESS_SECRET, { algorithms: ['HS256'] });
-}
-
-// Shared by the session expiry (expiresAt) and the refresh cookie's maxAge so they stay in step.
-export function getRefreshTokenTtlMs() {
-  const days = Number(process.env.REFRESH_TOKEN_EXPIRES_DAYS ?? 7);
-
-  if (!Number.isFinite(days) || days <= 0) {
-    throw new Error('REFRESH_TOKEN_EXPIRES_DAYS must be a positive number.');
-  }
-
-  return days * DAY_MS;
+  return jwt.verify(token, config.jwt.accessSecret, { algorithms: ['HS256'] });
 }

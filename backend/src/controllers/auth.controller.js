@@ -1,4 +1,3 @@
-import AppError from '../utils/AppError.js';
 import { REFRESH_TOKEN_COOKIE, clearAuthCookies, setAuthCookies } from '../utils/cookies.js';
 import { validateLogin, validateRegister } from '../validators/auth.validator.js';
 import {
@@ -27,22 +26,14 @@ export async function login(req, res) {
   res.json({ success: true, data: { user } });
 }
 
+// On failure the cookies are left alone: another tab may already have stored newer ones.
 export async function refresh(req, res) {
-  try {
-    const { user, accessToken, refreshToken } = await refreshSession(
-      req.cookies?.[REFRESH_TOKEN_COOKIE],
-    );
+  const { user, accessToken, refreshToken } = await refreshSession(
+    req.cookies?.[REFRESH_TOKEN_COOKIE],
+  );
 
-    setAuthCookies(res, accessToken, refreshToken);
-    res.json({ success: true, data: { user } });
-  } catch (error) {
-    // A rejected refresh token is useless to the client, so drop both cookies. Unexpected errors
-    // (e.g. the database being down) leave them alone so the user is not logged out for nothing.
-    if (error instanceof AppError) {
-      clearAuthCookies(res);
-    }
-    throw error;
-  }
+  setAuthCookies(res, accessToken, refreshToken);
+  res.json({ success: true, data: { user } });
 }
 
 export async function logout(req, res) {

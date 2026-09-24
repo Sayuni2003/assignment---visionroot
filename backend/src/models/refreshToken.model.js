@@ -23,12 +23,6 @@ const refreshTokenSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
-    // The session that replaced this one when the token was rotated.
-    replacedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'RefreshToken',
-      default: null,
-    },
   },
   { timestamps: true },
 );

@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 
+import { config } from '../config/env.js';
 import AppError from '../utils/AppError.js';
 
 export function notFound(req, res) {
@@ -54,6 +55,6 @@ export function errorHandler(err, req, res, next) {
     success: false,
     message,
     ...(errors ? { errors } : {}),
-    ...(process.env.NODE_ENV === 'development' ? { stack: err.stack } : {}),
+    ...(config.isDevelopment ? { stack: err.stack } : {}),
   });
 }

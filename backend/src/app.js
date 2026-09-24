@@ -3,17 +3,20 @@ import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 
+import { config } from './config/env.js';
 import healthRoutes from './routes/health.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
 import { notFound, errorHandler } from './middleware/error.middleware.js';
 
+// Builds the Express app only. It does not connect to MongoDB or listen on a port (server.js
+// does both), so tests can import it directly.
 const app = express();
 
 app.use(helmet());
 app.use(
   cors({
-    origin: process.env.CLIENT_ORIGIN,
+    origin: config.clientOrigin,
     credentials: true,
   }),
 );

@@ -1,19 +1,18 @@
 import bcrypt from 'bcrypt';
-import mongoose from 'mongoose';
 
 import User from '../models/user.model.js';
 import RefreshToken from '../models/refreshToken.model.js';
 import AppError from '../utils/AppError.js';
 import {
+  REFRESH_TOKEN_TTL_MS,
   generateRefreshToken,
-  getRefreshTokenTtlMs,
   hashToken,
   signAccessToken,
 } from '../utils/tokens.js';
 
 const BCRYPT_COST = 12;
 const INVALID_CREDENTIALS = 'Invalid email or password';
-const SESSION_INVALID = 'Session is no longer valid';
+const INVALID_REFRESH_TOKEN = 'Invalid or expired refresh token';
 
 let dummyPasswordHash;
 
@@ -30,21 +29,6 @@ function normaliseEmail(email) {
 
 export function hashPassword(password) {
   return bcrypt.hash(password, BCRYPT_COST);
-}
-
-function revokeAllUserSessions(userId) {
-  return RefreshToken.updateMany({ userId, revokedAt: null }, { $set: { revokedAt: new Date() } });
-}
-
-// A refresh token that was already rotated or revoked is being presented again, so it has most
-// likely been stolen. Every active session of the user is revoked to lock the attacker out.
-async function handleTokenReuse(session) {
-  const { modifiedCount } = await revokeAllUserSessions(session.userId);
-  console.warn(
-    `Refresh token reuse detected for user ${session.userId} (session ${session._id}); ` +
-      `revoked ${modifiedCount} active session(s).`,
-  );
-  throw new AppError(401, SESSION_INVALID);
 }
 
 export async function registerUser({ name, email, password }) {
@@ -85,14 +69,13 @@ export async function loginUser({ email, password }) {
   return createSession(user);
 }
 
-export async function createSession(user, sessionId = new mongoose.Types.ObjectId()) {
+export async function createSession(user) {
   const refreshToken = generateRefreshToken();
 
   const session = await RefreshToken.create({
-    _id: sessionId,
     userId: user._id,
     tokenHash: hashToken(refreshToken),
-    expiresAt: new Date(Date.now() + getRefreshTokenTtlMs()),
+    expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
   });
 
   const accessToken = signAccessToken(user, session._id);
@@ -107,39 +90,28 @@ export async function refreshSession(rawToken) {
 
   const session = await RefreshToken.findOne({ tokenHash: hashToken(rawToken) });
 
-  if (!session) {
-    throw new AppError(401, 'Invalid refresh token');
-  }
-
-  if (session.revokedAt) {
-    await handleTokenReuse(session);
-  }
-
-  if (session.expiresAt <= new Date()) {
-    throw new AppError(401, 'Refresh token expired');
+  if (!session || session.revokedAt || session.expiresAt <= new Date()) {
+    throw new AppError(401, INVALID_REFRESH_TOKEN);
   }
 
   const user = await User.findById(session.userId);
 
   if (!user) {
-    await RefreshToken.updateOne({ _id: session._id }, { $set: { revokedAt: new Date() } });
-    throw new AppError(401, SESSION_INVALID);
+    throw new AppError(401, INVALID_REFRESH_TOKEN);
   }
 
-  // Revoke the old session with a conditional update before issuing the new one. If two requests
-  // rotate the same token at once, only one can win; the other is handled as reuse. The next
-  // session's id is generated up front so replacedBy can be set in the same update.
-  const nextSessionId = new mongoose.Types.ObjectId();
-  const rotated = await RefreshToken.findOneAndUpdate(
+  // Rotate: revoke the old session only if it is still active. If two requests refresh with the
+  // same token at once, only one update matches; the other request gets a 401.
+  const { matchedCount } = await RefreshToken.updateOne(
     { _id: session._id, revokedAt: null },
-    { $set: { revokedAt: new Date(), replacedBy: nextSessionId } },
+    { $set: { revokedAt: new Date() } },
   );
 
-  if (!rotated) {
-    await handleTokenReuse(session);
+  if (matchedCount === 0) {
+    throw new AppError(401, INVALID_REFRESH_TOKEN);
   }
 
-  return createSession(user, nextSessionId);
+  return createSession(user);
 }
 
 // Revokes the session behind this refresh token. Missing, unknown or already revoked tokens are
