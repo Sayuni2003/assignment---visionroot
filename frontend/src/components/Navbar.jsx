@@ -40,13 +40,13 @@ function Navbar() {
     <header className="border-b bg-bg-nav">
       <nav
         aria-label="Main"
-        className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-x-6 px-4 py-3 sm:px-6"
+        className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-x-6 px-4 py-3 sm:px-6 lg:px-8"
       >
         <Link
           to={HOME_PATHS[user.role]}
-          className="font-semibold text-text-primary hover:text-text-primary"
+          className="text-lg font-bold text-primary hover:text-primary-hover"
         >
-          VisionRoot
+          RequestHub
         </Link>
 
         {/* Only visible below md; the menu below is always shown on larger screens. */}
@@ -76,7 +76,11 @@ function Navbar() {
 
           <div className="flex items-center justify-between gap-4">
             <span className="min-w-0 text-sm break-words text-text-secondary">{user.name}</span>
-            <button type="button" className="btn btn-secondary" onClick={handleLogout}>
+            <button
+              type="button"
+              className="btn bg-danger text-bg-card hover:bg-danger/90 hover:text-bg-card"
+              onClick={handleLogout}
+            >
               Log out
             </button>
           </div>

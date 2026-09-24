@@ -1,5 +1,5 @@
 {
-  "name": "visionroot-service-management-backend",
+  "name": "requesthub-service-management-backend",
   "version": "1.0.0",
   "description": "REST API for the Service Request Management System",
   "private": true,

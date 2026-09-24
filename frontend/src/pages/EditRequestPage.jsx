@@ -84,7 +84,7 @@ function EditRequestPage() {
 
   return (
     <div className="space-y-6">
-      <Link to={`/requests/${id}`} className="text-sm">
+      <Link to={`/requests/${id}`} className="inline-block text-sm font-bold text-text-primary hover:text-primary">
         ← Back to request
       </Link>
       <h1 className="text-2xl font-semibold">Edit request</h1>
