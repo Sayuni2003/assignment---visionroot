@@ -1,7 +1,7 @@
 // Operational error with an HTTP status. `errors` carries optional per-field details,
-// e.g. { email: 'Email is already registered' }.
+// e.g. new AppError(400, 'Validation failed', { email: 'Email is required' }).
 export default class AppError extends Error {
-  constructor(message, statusCode = 500, errors) {
+  constructor(statusCode, message, errors) {
     super(message);
     this.name = 'AppError';
     this.statusCode = statusCode;
