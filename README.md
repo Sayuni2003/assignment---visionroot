@@ -58,7 +58,7 @@ Language: JavaScript
 
 ```bash
 git clone <repository-url>
-cd visionroot-software-engineering-assignment
+cd <repository-folder>
 ```
 
 ### 2. Install frontend dependencies
@@ -91,7 +91,7 @@ Backend variables (`backend/.env`):
 | -------- | ----------- | ------- | ------- |
 | `PORT` | Port the API listens on | `5000` | `5000` |
 | `NODE_ENV` | `development` enables stack traces in error responses; `production` makes cookies `Secure`. Anything else, including unset, gets neither. | unset | `development` |
-| `MONGODB_URI` | MongoDB connection string | **required** | `mongodb://localhost:27017/visionroot_service_management` |
+| `MONGODB_URI` | MongoDB connection string | **required** | `mongodb://localhost:27017/requesthub_service_management` |
 | `CLIENT_ORIGIN` | Frontend origin allowed by CORS | **required** | `http://localhost:5173` |
 | `JWT_ACCESS_SECRET` | Secret used to sign access tokens; use a long random string | **required** | `replace-with-a-long-random-string` |
 | `ACCESS_TOKEN_EXPIRES_MINUTES` | Access token lifetime in minutes (used for both the JWT and its cookie) | `15` | `15` |

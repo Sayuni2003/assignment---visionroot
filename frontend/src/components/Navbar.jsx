@@ -46,7 +46,7 @@ function Navbar() {
           to={HOME_PATHS[user.role]}
           className="font-semibold text-text-primary hover:text-text-primary"
         >
-          VisionRoot
+          RequestHub
         </Link>
 
         {/* Only visible below md; the menu below is always shown on larger screens. */}
