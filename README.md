@@ -4,12 +4,12 @@
 
 A full-stack web application for managing service requests. Users with the **USER** role submit and track their own service requests, and users with the **ADMIN** role review them and move them through a status workflow.
 
-The project is being built incrementally. The current state is the **project foundation, backend authentication and authorization, and the backend service request API**: a React frontend and an Express REST API connected to MongoDB, with a health-check endpoint, registration and login, cookie-based JWT sessions, USER/ADMIN roles, and service requests with a status workflow (see [Service Requests](#service-requests)). The frontend screens have not been implemented yet.
+The project is being built incrementally. The current state is the **project foundation, backend authentication and authorization, the backend service request API, and the frontend screens**: an Express REST API connected to MongoDB, with a health-check endpoint, registration and login, cookie-based JWT sessions, USER/ADMIN roles, and service requests with a status workflow (see [Service Requests](#service-requests)), and a React single-page application in which USERs create, edit and cancel their requests and ADMINs review every request, change its status and list users (see [Frontend](#frontend)).
 
 ## Current Technology Stack
 
 ```text
-Frontend: React + Vite
+Frontend: React + Vite, React Router, Tailwind CSS
 Backend: Node.js + Express
 Database: MongoDB + Mongoose
 Language: JavaScript
@@ -23,7 +23,13 @@ Language: JavaScript
 └── backend/    Node.js + Express REST API (MongoDB via Mongoose)
 ```
 
-- **`frontend/`**: the React client. `src/services/` holds the code that calls the API. For now the page only shows the configured API URL and has a button that calls the health endpoint.
+- **`frontend/`**: the React client (see [Frontend](#frontend)).
+  - `src/api/` holds every call to the API: `client.js` plus one file per resource.
+  - `src/context/` holds `AuthContext` (who is logged in) and `ToastContext` (success and error notifications).
+  - `src/pages/` holds one component per route; `src/components/` holds the shared components and the route guards.
+  - `src/constants.js` mirrors the backend's request categories, priorities, statuses and transition table, plus display labels.
+  - `src/hooks/useDocumentTitle.js` sets the browser tab title for each page.
+  - `src/index.css` loads Tailwind CSS and defines the colour palette and the shared button and form classes.
 - **`backend/`**: the Express API.
   - `src/app.js` sets up Express: middleware, routes, and error handling. It does not connect to the database or listen on a port, so tests can import it directly.
   - `src/server.js` connects to MongoDB and starts the HTTP server.
@@ -141,7 +147,11 @@ cd frontend
 npm run dev
 ```
 
-Open `http://localhost:5173` and click **Check API health** to confirm the frontend can reach the backend. Use `localhost`, not `127.0.0.1`, so the origin matches `CLIENT_ORIGIN` (see [Frontend and API on the same site](#frontend-and-api-on-the-same-site)).
+The frontend needs `frontend/.env` with `VITE_API_URL` (step 4) and the backend running (step 6). Vite reads `.env` only when it starts, so restart `npm run dev` after changing it.
+
+Open **`http://localhost:5173`**, not `http://127.0.0.1:5173`. The auth cookies are only sent when the page and the API are on the same site, and CORS only allows `CLIENT_ORIGIN` (see [Frontend and API on the same site](#frontend-and-api-on-the-same-site)). The port is fixed (`strictPort` in `vite.config.js`): if 5173 is already in use, Vite exits instead of picking another port that `CLIENT_ORIGIN` would not allow.
+
+Log in with the admin account from step 6a, or create a USER account on the **Create an account** page.
 
 ## How to Run the Tests
 
@@ -564,3 +574,86 @@ GET /api/requests?page=1&limit=2&category=TECHNICAL&search=laptop
 | `409` | Status change not allowed by the transition table, including same-status changes and cancelling a `RESOLVED` or `CANCELLED` request | `Cannot change status from X to Y` |
 
 Checks run in this order: logged in (`401`), role (`403`), body or query validation (`400`), id format and ownership (`400`/`404`), then status rules (`409`).
+
+## Frontend
+
+A React single-page application built with Vite, React Router and Tailwind CSS, in plain JavaScript. For how to run it, see [Local Setup](#local-setup) steps 2, 4 and 7.
+
+### API layer (`src/api/`)
+
+Pages and components never call `fetch` themselves. They call the functions in `src/api/*.api.js`, which all go through one function, `request(path, { method, body, params })` in `src/api/client.js`:
+
+- Every call sends `credentials: 'include'`, so the browser stores and sends the HttpOnly auth cookies. A `body` is sent as JSON; `params` become the query string, skipping `undefined`, `null` and empty values (so an "All" filter is simply left out).
+- A success returns the parsed response body. A failure throws an `Error` whose `message` is the backend's `message` (or `Something went wrong`), with `status` set to the HTTP status and `errors` set to the backend's per-field errors, if any. If the server cannot be reached, the message is `Cannot reach the server. Please try again.`
+- **One-time refresh.** When a call returns `401` (except `/auth/login`, `/auth/refresh` and `/auth/logout`, where a `401` is a real answer), the client calls `POST /auth/refresh` once and retries the original call once. If the refresh fails, the call throws a `401` (`Your session has expired. Please log in again.`) and the client tells `AuthContext` that the session is over.
+- **Shared in-flight refresh.** A refresh token works only once (see [Rotation and revocation](#rotation-and-revocation)). If several calls get a `401` at the same time, they all wait for the same refresh (a module-level `refreshPromise`) instead of each starting their own; otherwise the second refresh would use an already-rotated token and log the user out.
+
+There is one file per resource:
+
+| File | Functions |
+| ---- | --------- |
+| `auth.api.js` | `register`, `login`, `logout`, `getMe` |
+| `requests.api.js` | `getRequests`, `getRequest`, `createRequest`, `updateRequest`, `cancelRequest`, `updateRequestStatus` |
+| `users.api.js` | `getUsers` |
+
+### Who is logged in (`AuthContext`)
+
+JavaScript cannot read the HttpOnly cookies, so the frontend asks the backend. When the app loads, `AuthProvider` (`src/context/AuthContext.jsx`) calls `GET /api/auth/me`: on success it stores the user (`id`, `name`, `email`, `role`), on failure the user stays `null`. `loading` is `true` until that answer arrives. If the access token has already expired, the client refreshes it first, so reloading the page keeps the user logged in.
+
+`useAuth()` exposes `user`, `loading`, `login(email, password)` (logs in, then calls `/auth/me`), `register(data)` (creates the account only; registering does not log in), `logout()` (forgets the user even if the logout call fails) and `clearUser()`.
+
+`AuthContext` registers `clearUser` with the API client, which calls it when a refresh fails. The route guards then see no user and redirect to `/login`, so no page has to handle an expired session itself.
+
+### Route guards
+
+Both guards live in `src/components/` and wrap groups of routes in `src/App.jsx`. Both show a loader while `loading` is `true`.
+
+- **`ProtectedRoute`**, with an optional `role`: without a user it redirects to `/login`; with a user of the wrong role it redirects to that user's home page (`/requests` for a USER, `/admin/requests` for an ADMIN, from `HOME_PATHS` in `src/constants.js`).
+- **`PublicRoute`**, for `/login` and `/register`: a logged-in user is redirected to their home page.
+
+The guards only decide what the frontend shows. The backend still checks every call (`401`, `403`, `404`).
+
+### Shared components
+
+| Component | Purpose |
+| --------- | ------- |
+| `Layout`, `Navbar` | Frame for every logged-in page: role-aware links, the user's name and **Log out**. Below the `md` breakpoint the links collapse behind a **Menu** button (`aria-expanded`). |
+| `RequestList` | Requests as stacked cards on small screens and a table from `md` upwards; each links to its details page. Shows an owner column when `showOwner` is set (admin list). |
+| `RequestForm` | Create and edit form. Checks the same limits as the backend before sending, and shows the backend's field errors (or its message) if the API rejects the data. |
+| `RequestActions` | The USER's **Edit** and **Cancel request** buttons on the details page. |
+| `StatusUpdateForm` | The ADMIN's status `<select>` and **Update** button on the details page. |
+| `StatusBadge`, `PriorityBadge`, `RoleBadge` | Coloured pills that always show a text label, never colour alone. |
+| `Pagination` | **Previous** / **Next** and "Page X of Y"; hidden when there is only one page. |
+| `FilterSelect` | A labelled `<select>` with an "All" option, used by the admin filters. |
+| `Loader`, `EmptyState`, `ErrorMessage` | Loading, empty and error states; `ErrorMessage` can show a **Retry** button. |
+| `AuthCard` | Centred card used by the login and register pages. |
+| `ToastList` | Success and error notifications, shown by `ToastProvider` (`src/context/ToastContext.jsx`, used through `useToast()`). Each disappears after about 3 seconds and can be dismissed. |
+
+Colours come only from the palette tokens defined in the `@theme` block of `src/index.css` (Tailwind CSS v4 through the `@tailwindcss/vite` plugin, so there is no `tailwind.config.js`). The same file defines the shared `.btn`, `.btn-primary`, `.btn-secondary`, `.form-label`, `.form-input` and `.form-error` classes and a visible `:focus-visible` outline for keyboard users.
+
+### Pages
+
+| Route | Role | Page | Purpose |
+| ----- | ---- | ---- | ------- |
+| `/login` | Logged out | `LoginPage` | Log in, then go to the user's home page |
+| `/register` | Logged out | `RegisterPage` | Create a USER account, then go to `/login` |
+| `/` | Any logged-in user | – | Redirects to the user's home page |
+| `/requests` | USER | `MyRequestsPage` | The user's own requests, 10 per page, with a **New request** button |
+| `/requests/new` | USER | `NewRequestPage` | Create a request |
+| `/requests/:id` | USER (own) or ADMIN | `RequestDetailsPage` | All details of one request. A USER can edit or cancel it; an ADMIN also sees the owner and can change the status |
+| `/requests/:id/edit` | USER | `EditRequestPage` | Edit a `PENDING` request; any other status shows "This request can no longer be edited" |
+| `/admin/requests` | ADMIN | `AdminRequestsPage` | Every request with an owner column, search, status/category/priority filters, sorting and pagination |
+| `/admin/users` | ADMIN | `AdminUsersPage` | Every user with name, email, role and joined date |
+| any other path | Anyone | `NotFoundPage` | "Page not found" with a link home |
+
+All logged-in pages share the `Layout`. Each page sets the browser tab title through `useDocumentTitle`, for example `My Requests | Service Requests`.
+
+### Status rules in the frontend
+
+`src/constants.js` mirrors the backend's `CATEGORIES`, `PRIORITIES`, `STATUSES`, `ALLOWED_TRANSITIONS` and `canTransition` (see [Status transitions](#status-transitions)). The frontend uses them **only to decide which actions to show**:
+
+- **Edit** appears only while a request is `PENDING`.
+- **Cancel request** appears only when `canTransition(status, 'CANCELLED')` is true.
+- The ADMIN's status `<select>` lists only `ALLOWED_TRANSITIONS[status]`. For `RESOLVED` and `CANCELLED` it shows "This request is closed." instead.
+
+**The backend is the authority.** It checks every rule again, whatever the frontend shows. If the screen is out of date (for example, an admin changed the status in another tab), the action is rejected with `409` and the backend's message is shown in the form or as an error notification. The form validation in `RequestForm` and on the register page mirrors the backend validators in the same way. When a rule changes, update `backend/src/constants/request.constants.js` and `frontend/src/constants.js` together.
