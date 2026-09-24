@@ -2,9 +2,9 @@
 
 ## Project Overview
 
-A full-stack web application for managing service requests. Users with the **USER** role will be able to submit and track their own service requests, and users with the **ADMIN** role will be able to review them and move them through a status workflow.
+A full-stack web application for managing service requests. Users with the **USER** role submit and track their own service requests, and users with the **ADMIN** role review them and move them through a status workflow.
 
-The project is being built incrementally. The current state is the **project foundation plus backend authentication and authorization**: a React frontend and an Express REST API connected to MongoDB, with a health-check endpoint, registration and login, cookie-based JWT sessions, and USER/ADMIN roles. Service request features and the frontend login screens have not been implemented yet.
+The project is being built incrementally. The current state is the **project foundation, backend authentication and authorization, and the backend service request API**: a React frontend and an Express REST API connected to MongoDB, with a health-check endpoint, registration and login, cookie-based JWT sessions, USER/ADMIN roles, and service requests with a status workflow (see [Service Requests](#service-requests)). The frontend screens have not been implemented yet.
 
 ## Current Technology Stack
 
@@ -31,12 +31,15 @@ Language: JavaScript
   - `src/config/database.js` holds the MongoDB connection logic.
   - `src/middleware/error.middleware.js` contains the 404 handler and the central error handler.
   - `src/middleware/auth.middleware.js` contains `authenticate` (who is calling) and `authorize` (which roles may call).
-  - `src/models/` holds the Mongoose models: `User` and `RefreshToken` (one document per login session).
+  - `src/models/` holds the Mongoose models: `User`, `RefreshToken` (one document per login session) and `ServiceRequest`.
+  - `src/constants/request.constants.js` holds the request categories, priorities, statuses and the status transition table.
   - `src/validators/` holds plain request-validation functions.
   - `src/services/auth.service.js` holds the registration, login, refresh and logout logic.
+  - `src/services/request.service.js` holds every service request business rule (ownership, editing, cancelling, status changes).
   - `src/controllers/` and `src/routes/` hold thin HTTP handlers and route definitions.
   - `src/utils/` holds `AppError`, token helpers (`tokens.js`) and auth cookie helpers (`cookies.js`).
   - `src/scripts/seed-admin.js` creates the first ADMIN account.
+  - `tests/` holds the automated tests (see [How to Run the Tests](#how-to-run-the-tests)).
 
 ## Local Setup
 
@@ -140,6 +143,35 @@ npm run dev
 
 Open `http://localhost:5173` and click **Check API health** to confirm the frontend can reach the backend. Use `localhost`, not `127.0.0.1`, so the origin matches `CLIENT_ORIGIN` (see [Frontend and API on the same site](#frontend-and-api-on-the-same-site)).
 
+## How to Run the Tests
+
+The backend tests use **Jest**, **Supertest** and **mongodb-memory-server**. Each run starts its own temporary in-memory MongoDB and throws it away afterwards, so you do not need a running MongoDB or a `backend/.env` file.
+
+```bash
+cd backend
+npm test
+```
+
+The first run downloads a MongoDB binary for mongodb-memory-server, so it is slower; later runs use the cached copy.
+
+Useful variations (everything after `--` is passed to Jest):
+
+```bash
+npm test -- tests/requests.api.test.js    # one file
+npm test -- -t "cancelling"               # only tests whose name matches
+npm test -- --watch                       # re-run on every file change
+```
+
+| File | What it covers |
+| ---- | -------------- |
+| `tests/setup-env.js` | Sets test environment variables before `src/config/env.js` loads (Jest `setupFiles`) |
+| `tests/helpers.js` | Shared helpers: start, clear and stop the in-memory database; register and log in users; create an admin |
+| `tests/auth.api.test.js` | API tests for `/api/auth` and `/api/users`: register, login, `me`, refresh rotation, logout, admin-only user listing, and the role being read from the database |
+| `tests/request.constants.test.js` | Unit tests for `canTransition`: every allowed and forbidden transition, and unknown statuses |
+| `tests/requests.api.test.js` | API tests for `/api/requests`: authentication and roles, validation, ownership, editing, cancelling, admin status changes, pagination, filtering and search |
+
+The backend uses ES modules, so the `test` script runs Jest with Node's `--experimental-vm-modules` flag. The `ExperimentalWarning: VM Modules` line printed on each run is expected.
+
 ## Configuration
 
 All environment variables are read in one place, `backend/src/config/env.js`, which exports a frozen `config` object (for example `config.jwt.accessSecret`, `config.refreshToken.expiresDays`, `config.isDevelopment`). No other module reads `process.env`; the only exception is the seed script, which reads the `SEED_ADMIN_*` variables it alone uses.
@@ -175,7 +207,7 @@ Every endpoint follows one convention:
 | Kind | Shape |
 | ---- | ----- |
 | Single resource | `{ "success": true, "data": { "<name>": { ... } } }`, e.g. `data: { user }` |
-| List | `{ "success": true, "data": [ ... ], "pagination"?: { ... } }` (no endpoint paginates yet) |
+| List | `{ "success": true, "data": [ ... ], "pagination"?: { ... } }` (only `GET /api/requests` paginates) |
 | Action with no resource | `{ "success": true, "message": "..." }`, e.g. health check, logout |
 | Error | `{ "success": false, "message": "...", "errors"?: { "<field>": "..." } }` |
 
@@ -378,3 +410,157 @@ Each login is its own session. `POST /api/auth/logout` revokes only the session 
 
 - **Log out of all devices**: revoke every active session of the user.
 - **Rate limiting** on `/login` and `/refresh` to slow down password guessing and token abuse.
+
+## Service Requests
+
+A service request is a problem a USER reports (for example "Laptop will not boot"). The owner can edit it while it is still pending and cancel it while it is open; an ADMIN reviews every request and moves it through the status workflow. All rules are enforced in the backend (`src/services/request.service.js`), not only in the frontend.
+
+### Request fields
+
+| Field | Type | Rules |
+| ----- | ---- | ----- |
+| `title` | string | Required. Trimmed, 3–100 characters. |
+| `description` | string | Required. Trimmed, 10–2000 characters. |
+| `category` | string | Required. One of `TECHNICAL`, `BILLING`, `ACCOUNT`, `OTHER`. |
+| `priority` | string | Optional. One of `LOW`, `MEDIUM`, `HIGH`. Defaults to `MEDIUM`. |
+| `status` | string | One of `PENDING`, `IN_PROGRESS`, `RESOLVED`, `CANCELLED`. Always starts as `PENDING`. Cannot be set on create or edit; it only changes through cancel or the admin status endpoint. |
+| `createdBy` | ObjectId (ref `User`) | Set from the logged-in user. A `createdBy` sent in the body is ignored. |
+| `createdAt`, `updatedAt` | Date | Set automatically by Mongoose (`timestamps: true`). |
+
+Create and edit bodies only read `title`, `description`, `category` and `priority`; any other field (`status`, `createdBy`, `_id`, ...) is silently ignored. Responses include MongoDB's `_id` and `__v`.
+
+### Status transitions
+
+| From | Allowed next statuses |
+| ---- | --------------------- |
+| `PENDING` | `IN_PROGRESS`, `CANCELLED` |
+| `IN_PROGRESS` | `RESOLVED`, `CANCELLED` |
+| `RESOLVED` | none (final) |
+| `CANCELLED` | none (final) |
+
+This table lives in one place, `ALLOWED_TRANSITIONS` in `src/constants/request.constants.js`. The backend enforces it through `canTransition(from, to)`, which both cancel and the admin status endpoint call before saving. Moving to the same status (for example `PENDING` to `PENDING`) is not a transition and is rejected. A rejected change returns `409` with the message `Cannot change status from X to Y`.
+
+### Business rules
+
+| Action | USER | ADMIN |
+| ------ | ---- | ----- |
+| Create a request | Yes; the USER becomes its owner | No (`403`) |
+| List requests | Only their own | All requests |
+| View one request | Only their own; anyone else's returns `404` | Any request |
+| Edit `title`, `description`, `category`, `priority` | Only their own, and only while `PENDING` (otherwise `409`) | No (`403`) |
+| Cancel (`DELETE`) | Only their own, while `PENDING` or `IN_PROGRESS` (otherwise `409`) | No (`403`) |
+| Change status | No (`403`) | Any request, following the transition table |
+
+- **404 instead of 403 for other users' requests.** When a USER asks for a request that belongs to someone else, the API answers exactly as if the request did not exist (`404 Request not found`). A `403` would confirm that the id is real, so request ids could be probed.
+- **Cancel is a status change, not a deletion.** `DELETE /api/requests/:id` sets the status to `CANCELLED` and saves the request; the document is never removed, so the history stays complete.
+- **Roles are checked in the routes, ownership in the service.** `authorize(...)` decides which role may call an endpoint (`403`); `request.service.js` decides which requests a USER may touch (`404`) and whether the status allows the action (`409`).
+
+### Service request endpoints (`/api/requests`)
+
+Every endpoint requires a logged-in user (the `accessToken` cookie). Bodies are JSON.
+
+| Method | Path | Role | Success |
+| ------ | ---- | ---- | ------- |
+| `GET` | `/api/requests` | USER (own) or ADMIN (all) | `200` |
+| `POST` | `/api/requests` | USER | `201` |
+| `GET` | `/api/requests/:id` | USER (own) or ADMIN | `200` |
+| `PATCH` | `/api/requests/:id` | USER (own, `PENDING` only) | `200` |
+| `DELETE` | `/api/requests/:id` | USER (own) | `200` |
+| `PATCH` | `/api/requests/:id/status` | ADMIN | `200` |
+
+#### `POST /api/requests`
+
+```json
+{ "title": "Laptop will not boot", "description": "Black screen after the logo since this morning.", "category": "TECHNICAL", "priority": "HIGH" }
+```
+
+Returns `201` with `{ "success": true, "message": "Request created", "data": { "request": { ... } } }`.
+
+#### `PATCH /api/requests/:id`
+
+Send any of `title`, `description`, `category` and `priority` (same rules as create). At least one of them is required. Returns `{ "success": true, "message": "Request updated", "data": { "request": { ... } } }`.
+
+#### `DELETE /api/requests/:id`
+
+No body. Cancels the request. Returns `{ "success": true, "message": "Request cancelled", "data": { "request": { ... } } }` with `status: "CANCELLED"`.
+
+#### `PATCH /api/requests/:id/status`
+
+```json
+{ "status": "IN_PROGRESS" }
+```
+
+Returns `{ "success": true, "message": "Status updated", "data": { "request": { ... } } }`.
+
+`GET /api/requests` and `GET /api/requests/:id` return `createdBy` populated as `{ "name", "email", "id" }`. The create, edit, cancel and status endpoints return `createdBy` as the owner's id only.
+
+### List query parameters
+
+`GET /api/requests` accepts these query parameters. A USER's results are always limited to their own requests, whatever the filters say.
+
+| Parameter | Default | Rules |
+| --------- | ------- | ----- |
+| `page` | `1` | Whole number, at least 1 |
+| `limit` | `10` | Whole number, 1–50 |
+| `search` | none | Case-insensitive match anywhere in `title` or `description`. Special characters such as `.` or `(` are matched literally. Empty or whitespace-only means no search. |
+| `status` | none | One of the statuses |
+| `category` | none | One of the categories |
+| `priority` | none | One of the priorities |
+| `sortBy` | `createdAt` | `createdAt` or `updatedAt` |
+| `order` | `desc` | `asc` or `desc` |
+
+An invalid value returns `400` listing every bad parameter; it is never silently replaced by the default (for example `page=abc`, `limit=51`, or an empty `status=`). Unknown parameters are ignored.
+
+Example:
+
+```text
+GET /api/requests?page=1&limit=2&category=TECHNICAL&search=laptop
+```
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "_id": "6ab519a1642e3a8cbf38bf96",
+      "title": "Laptop will not boot",
+      "description": "Black screen after the logo since this morning.",
+      "category": "TECHNICAL",
+      "priority": "HIGH",
+      "status": "PENDING",
+      "createdBy": {
+        "name": "Jane Doe",
+        "email": "jane@example.com",
+        "id": "6ab519a1642e3a8cbf38bf93"
+      },
+      "createdAt": "2026-09-24T12:37:53.358Z",
+      "updatedAt": "2026-09-24T12:37:53.358Z",
+      "__v": 0
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 2,
+    "total": 1,
+    "totalPages": 1
+  }
+}
+```
+
+`total` is the number of matching requests across all pages, and `totalPages` is `total / limit` rounded up (`0` when nothing matches). A `page` past the end returns an empty `data` array.
+
+### Service request errors
+
+| Status | When | Message |
+| ------ | ---- | ------- |
+| `400` | Invalid body or query parameters (`errors` lists each field) | `Validation failed` |
+| `400` | Edit body contains none of `title`, `description`, `category`, `priority` | `At least one field is required` |
+| `400` | `:id` is not a valid MongoDB id | `Invalid ID` |
+| `400` | Body is not valid JSON | `Malformed JSON` |
+| `401` | Not logged in, or the access token or session is no longer valid | depends on the reason |
+| `403` | Role not allowed: an ADMIN creating, editing or cancelling, or a USER changing status | `You do not have permission to perform this action` |
+| `404` | The request does not exist, or it belongs to another user (for a USER) | `Request not found` |
+| `409` | Editing a request that is not `PENDING` | `Only pending requests can be edited` |
+| `409` | Status change not allowed by the transition table, including same-status changes and cancelling a `RESOLVED` or `CANCELLED` request | `Cannot change status from X to Y` |
+
+Checks run in this order: logged in (`401`), role (`403`), body or query validation (`400`), id format and ownership (`400`/`404`), then status rules (`409`).

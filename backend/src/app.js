@@ -7,6 +7,7 @@ import { config } from './config/env.js';
 import healthRoutes from './routes/health.routes.js';
 import authRoutes from './routes/auth.routes.js';
 import userRoutes from './routes/user.routes.js';
+import requestRoutes from './routes/request.routes.js';
 import { notFound, errorHandler } from './middleware/error.middleware.js';
 
 // Builds the Express app only. It does not connect to MongoDB or listen on a port (server.js
@@ -26,6 +27,7 @@ app.use(cookieParser());
 app.use('/api/health', healthRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/requests', requestRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
