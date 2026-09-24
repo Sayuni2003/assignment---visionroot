@@ -19,7 +19,7 @@ function NewRequestPage() {
 
   return (
     <div className="space-y-6">
-      <Link to="/requests" className="text-sm">
+      <Link to="/requests" className="inline-block text-sm font-bold text-text-primary hover:text-primary">
         ← Back to my requests
       </Link>
       <h1 className="text-2xl font-semibold">New request</h1>

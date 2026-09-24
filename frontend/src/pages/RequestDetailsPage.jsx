@@ -133,7 +133,7 @@ function RequestDetailsPage() {
 
   return (
     <div className="space-y-6">
-      <Link to={backPath} className="text-sm">
+      <Link to={backPath} className="inline-block text-sm font-bold text-text-primary hover:text-primary">
         ← Back to requests
       </Link>
       {renderContent()}
