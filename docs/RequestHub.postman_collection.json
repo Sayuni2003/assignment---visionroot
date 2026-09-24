@@ -1,0 +1,2615 @@
+{
+  "info": {
+    "_postman_id": "3b8f5d2a-6c1e-4f7a-9b0d-2e4c6a8f1b35",
+    "name": "RequestHub API",
+    "description": "# RequestHub API\n\nREST API of the RequestHub service request management system (Node.js, Express 5, MongoDB). USERs submit and track their own service requests; ADMINs review every request and move it through the status workflow.\n\n## Base URL\n\nAll requests use the collection variable `{{baseUrl}}`, which defaults to `http://localhost:5000/api` (the backend's default `PORT=5000` plus the `/api` prefix mounted in `src/app.js`).\n\n## Authentication: HttpOnly cookies (no Bearer token)\n\nThe API does **not** use an `Authorization` header. `POST /auth/login` (and `POST /auth/refresh`) respond with two `Set-Cookie` headers:\n\n| Cookie | Lifetime (default) | Path | Used by |\n| --- | --- | --- | --- |\n| `accessToken` | 15 minutes (`ACCESS_TOKEN_EXPIRES_MINUTES`) | `/` | every protected endpoint |\n| `refreshToken` | 7 days (`REFRESH_TOKEN_EXPIRES_DAYS`) | `/api/auth` | only `/auth/refresh` and `/auth/logout` |\n\nBoth are `HttpOnly; SameSite=Lax` (plus `Secure` when `NODE_ENV=production`). Tokens never appear in response bodies.\n\n**Postman handles this automatically:** its cookie jar stores the cookies from the login response and sends them with every later request to `localhost`, respecting each cookie's path. No auth configuration is needed; this collection is set to *No Auth* on purpose. Open **Cookies** (under the Send button) to inspect or delete them.\n\nThe cookie jar holds **one session at a time**: running *Login (ADMIN)* replaces the USER's cookies and vice versa. Log in with the role that the endpoint needs before calling it.\n\nWhen the access token expires (after 15 minutes), protected calls return `401`; run **Authentication › Refresh** (or log in again).\n\n## Roles\n\n- `USER`: created by public registration. Creates, lists, views, edits and cancels **their own** requests.\n- `ADMIN`: cannot be registered through the API; create one with `npm run seed:admin` in `backend/` (uses `SEED_ADMIN_*` from `backend/.env`). Lists and views **all** requests, changes their status and lists users. An ADMIN **cannot** create, edit or cancel requests (`403`).\n\nThe role is read from the database on every request, never from the token.\n\n## Response shapes\n\n| Kind | Shape |\n| --- | --- |\n| Single resource | `{ \"success\": true, \"message\"?: \"...\", \"data\": { \"<name>\": { ... } } }` |\n| List | `{ \"success\": true, \"data\": [ ... ], \"pagination\"?: { ... } }` (only `GET /requests` paginates) |\n| Action | `{ \"success\": true, \"message\": \"...\" }` |\n| Error | `{ \"success\": false, \"message\": \"...\", \"errors\"?: { \"<field>\": \"...\" } }` |\n\nWith `NODE_ENV=development` error responses also contain a `stack` field (omitted from the examples here).\n\nUsers are serialised with `id` (no `_id`, `__v` or password hash). Service requests are serialised with MongoDB's `_id` and `__v`.\n\n## Status codes\n\n| Status | Meaning in this API | Typical message |\n| --- | --- | --- |\n| `400` | Validation failed (body or query), malformed JSON, or `:id` is not a valid MongoDB ObjectId | `Validation failed` (+ `errors` per field), `At least one field is required`, `Malformed JSON`, `Invalid ID` |\n| `401` | **Authentication** failed: no `accessToken` cookie, invalid/expired token, revoked session, deleted user, or bad login credentials | `Authentication required`, `Invalid or expired access token`, `Session is no longer valid`, `Invalid email or password` |\n| `403` | **Authorization** failed: logged in, but the role may not call this endpoint (e.g. ADMIN creating a request, USER changing a status) | `You do not have permission to perform this action` |\n| `404` | The request does not exist **or belongs to another USER** (ownership is hidden, never reported as 403); also unknown routes | `Request not found`, `Route not found: <METHOD> <path>` |\n| `409` | **Business-rule conflict**: editing a non-`PENDING` request, a status change not allowed by the workflow, or an already-registered email | `Only pending requests can be edited`, `Cannot change status from X to Y`, `Email is already registered` |\n| `413` | JSON body larger than 10 kB | `Request body too large` |\n| `500` | Unexpected server error (details are logged, never returned) | `Internal server error` |\n\nFor service request endpoints the checks run in this order: logged in (`401`) → role (`403`) → body/query validation (`400`) → id format (`400 Invalid ID`) and existence/ownership (`404`) → status rules (`409`).\n\n## Status workflow\n\n```\nPENDING ──► IN_PROGRESS ──► RESOLVED   (final)\n   │             │\n   └─────────────┴────────► CANCELLED  (final)\n```\n\n| From | Allowed next statuses |\n| --- | --- |\n| `PENDING` | `IN_PROGRESS`, `CANCELLED` |\n| `IN_PROGRESS` | `RESOLVED`, `CANCELLED` |\n| `RESOLVED` | none (final) |\n| `CANCELLED` | none (final) |\n\nAny other change, including a \"change\" to the same status (e.g. `PENDING` → `PENDING`), returns `409 Cannot change status from X to Y`.\n\n## Collection variables\n\n| Variable | Purpose |\n| --- | --- |\n| `baseUrl` | API root, default `http://localhost:5000/api` |\n| `userName`, `userEmail`, `userPassword` | Account used by *Register* and *Login (USER)* |\n| `adminEmail`, `adminPassword` | Seeded admin account used by *Login (ADMIN)*. **Set these to your `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`.** |\n| `userId` | Set automatically from *Register* / *Login (USER)*. For reference only (compare with `createdBy`); no endpoint takes a user id. |\n| `requestId` | Set automatically by *Create request*; used by every `/requests/:id` call. |\n\n## Suggested walkthrough\n\n1. **Health › Health check**: confirm the API is up.\n2. **Authentication › Register** (once), then **Login (USER)**, then **Get current user**.\n3. **Service Requests › Create request** (stores `requestId`), **List requests**, **Get request by ID**, **Update request**.\n4. **Authentication › Login (ADMIN)**, then **Service Requests › Update request status (ADMIN)** (`IN_PROGRESS`, then `RESOLVED`), and **Users / Admin › List users**.\n5. To try **Cancel request**, log in as the USER again and create a fresh request first (a `RESOLVED` or `CANCELLED` request cannot be cancelled).\n6. **Authentication › Logout**.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "noauth"
+  },
+  "item": [
+    {
+      "name": "Authentication",
+      "description": "Registration, cookie-based login, session refresh and logout (`/api/auth`).\n\n- **Register** creates a `USER` account only; it does **not** log in and sets no cookies.\n- **Login** sets the `accessToken` (path `/`) and `refreshToken` (path `/api/auth`) HttpOnly cookies. Postman's cookie jar stores them and sends them automatically.\n- **Refresh** rotates the session: the old refresh token stops working and new cookies are set.\n- **Logout** revokes the session and clears both cookies. It never fails.\n\nRequest bodies are JSON. Unknown fields (for example `role`) are ignored.",
+      "item": [
+        {
+          "name": "Register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('userId', pm.response.json().data.user.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/register",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "register"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{userName}}\",\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Creates a new **USER** account.\n\n**Authentication:** none (public). **Role:** none.\n\n**Body (JSON)**\n\n| Field | Type | Required | Rules |\n| --- | --- | --- | --- |\n| `name` | string | yes | 2–50 characters after trimming |\n| `email` | string | yes | Valid email (`x@y.z`); trimmed and lower-cased; must not already be registered (case-insensitive) |\n| `password` | string | yes | 8–72 characters (max 72 **bytes**, the bcrypt limit) |\n\nA `role` field is ignored: public registration always creates a `USER`. Admins are created only with `npm run seed:admin`.\n\nRegistration does **not** log the user in and sets **no** cookies. Run *Login (USER)* next.\n\n**Script:** stores `data.user.id` in `{{userId}}`.\n\n| Status | When |\n| --- | --- |\n| `201` | Account created |\n| `400` | `Validation failed`, `errors` lists each invalid field |\n| `409` | `Email is already registered` (re-running this request with the same `userEmail` gives 409; change the variable) |"
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/register",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "register"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"{{userName}}\",\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Registration successful\",\n  \"data\": {\n    \"user\": {\n      \"name\": \"Jane Doe\",\n      \"email\": \"jane.doe@example.com\",\n      \"role\": \"USER\",\n      \"createdAt\": \"2026-09-24T09:15:32.481Z\",\n      \"updatedAt\": \"2026-09-24T09:15:32.481Z\",\n      \"id\": \"66f2a1c4e5b7d8a9c0f1a2b3\"\n    }\n  }\n}"
+            },
+            {
+              "name": "400 Validation failed",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/register",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "register"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"J\",\n  \"email\": \"not-an-email\",\n  \"password\": \"short\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Validation failed\",\n  \"errors\": {\n    \"name\": \"Name must be between 2 and 50 characters\",\n    \"email\": \"A valid email is required\",\n    \"password\": \"Password must be between 8 and 72 characters\"\n  }\n}"
+            },
+            {
+              "name": "409 Email already registered",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/register",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "register"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"{{userName}}\",\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Conflict",
+              "code": 409,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Email is already registered\",\n  \"errors\": {\n    \"email\": \"Email is already registered\"\n  }\n}"
+            }
+          ]
+        },
+        {
+          "name": "Login (USER)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  pm.collectionVariables.set('userId', pm.response.json().data.user.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Logs in with the USER account from `{{userEmail}}` / `{{userPassword}}`.\n\n**Authentication:** none (public). **Role:** any.\n\n**Body (JSON)**\n\n| Field | Type | Required | Rules |\n| --- | --- | --- | --- |\n| `email` | string | yes | Non-empty; matched case-insensitively |\n| `password` | string | yes | Non-empty |\n\nOn success the response sets two HttpOnly cookies, `accessToken` (path `/`) and `refreshToken` (path `/api/auth`). The body contains the user only; tokens are never returned in the body. Postman stores the cookies and sends them with later requests automatically.\n\nLogging in replaces any cookies from a previous login (for example the ADMIN's).\n\n**Script:** stores `data.user.id` in `{{userId}}`.\n\n| Status | When |\n| --- | --- |\n| `200` | Logged in, cookies set |\n| `400` | `Validation failed`: email or password missing |\n| `401` | `Invalid email or password` (same response for an unknown email and a wrong password) |"
+          },
+          "response": [
+            {
+              "name": "200 OK (sets cookies)",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/login",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "login"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"{{userPassword}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                },
+                {
+                  "key": "Set-Cookie",
+                  "value": "accessToken=<JWT>; Max-Age=900; Path=/; Expires=Thu, 24 Sep 2026 09:30:32 GMT; HttpOnly; SameSite=Lax"
+                },
+                {
+                  "key": "Set-Cookie",
+                  "value": "refreshToken=<80-hex-char token>; Max-Age=604800; Path=/api/auth; Expires=Thu, 01 Oct 2026 09:15:32 GMT; HttpOnly; SameSite=Lax"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"user\": {\n      \"name\": \"Jane Doe\",\n      \"email\": \"jane.doe@example.com\",\n      \"role\": \"USER\",\n      \"createdAt\": \"2026-09-24T09:15:32.481Z\",\n      \"updatedAt\": \"2026-09-24T09:15:32.481Z\",\n      \"id\": \"66f2a1c4e5b7d8a9c0f1a2b3\"\n    }\n  }\n}"
+            },
+            {
+              "name": "400 Missing fields",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/login",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "login"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Validation failed\",\n  \"errors\": {\n    \"email\": \"Email is required\",\n    \"password\": \"Password is required\"\n  }\n}"
+            },
+            {
+              "name": "401 Invalid credentials",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/login",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "login"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"{{userEmail}}\",\n  \"password\": \"wrong-password\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Invalid email or password\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Login (ADMIN)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "login"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Same endpoint as *Login (USER)*, using the seeded admin account `{{adminEmail}}` / `{{adminPassword}}`.\n\n**Authentication:** none (public).\n\nADMIN accounts cannot be registered through the API. Create one once with `npm run seed:admin` in `backend/` (reads `SEED_ADMIN_NAME`, `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD` from `backend/.env`), then set the `adminEmail` and `adminPassword` collection variables to match.\n\nRunning this replaces the USER's cookies in Postman's cookie jar; run *Login (USER)* again to switch back.\n\n| Status | When |\n| --- | --- |\n| `200` | Logged in as ADMIN, cookies set |\n| `400` | Email or password missing |\n| `401` | `Invalid email or password` (check the admin variables and that the seed script ran) |"
+          },
+          "response": [
+            {
+              "name": "200 OK (sets cookies)",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/login",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "login"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                },
+                {
+                  "key": "Set-Cookie",
+                  "value": "accessToken=<JWT>; Max-Age=900; Path=/; Expires=Thu, 24 Sep 2026 09:30:32 GMT; HttpOnly; SameSite=Lax"
+                },
+                {
+                  "key": "Set-Cookie",
+                  "value": "refreshToken=<80-hex-char token>; Max-Age=604800; Path=/api/auth; Expires=Thu, 01 Oct 2026 09:15:32 GMT; HttpOnly; SameSite=Lax"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"user\": {\n      \"name\": \"System Admin\",\n      \"email\": \"admin@example.com\",\n      \"role\": \"ADMIN\",\n      \"createdAt\": \"2026-09-20T08:00:00.000Z\",\n      \"updatedAt\": \"2026-09-20T08:00:00.000Z\",\n      \"id\": \"66f2a0b1c2d3e4f5a6b7c8d9\"\n    }\n  }\n}"
+            },
+            {
+              "name": "401 Invalid credentials",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/login",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "login"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"{{adminEmail}}\",\n  \"password\": \"{{adminPassword}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Invalid email or password\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get current user (me)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "me"
+              ]
+            },
+            "description": "Returns the user behind the current `accessToken` cookie. Useful to check who is logged in.\n\n**Authentication:** required (`accessToken` cookie). **Role:** any.\n\nThe returned user has only `id`, `name`, `email` and `role`.\n\n| Status | When |\n| --- | --- |\n| `200` | Logged in |\n| `401` | `Authentication required` (no cookie), `Invalid or expired access token`, `Session is no longer valid` (logged out or refreshed), or `User no longer exists` |"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/me",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "me"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"user\": {\n      \"id\": \"66f2a1c4e5b7d8a9c0f1a2b3\",\n      \"name\": \"Jane Doe\",\n      \"email\": \"jane.doe@example.com\",\n      \"role\": \"USER\"\n    }\n  }\n}"
+            },
+            {
+              "name": "401 Not logged in",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/me",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "me"
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Authentication required\"\n}"
+            },
+            {
+              "name": "401 Access token expired",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/me",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "me"
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Invalid or expired access token\"\n}"
+            },
+            {
+              "name": "401 Session revoked (after logout)",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/me",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "me"
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Session is no longer valid\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Refresh session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/auth/refresh",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "refresh"
+              ]
+            },
+            "description": "Issues a new access token and a new refresh token from the `refreshToken` cookie. Use it when protected calls start returning `401` because the 15-minute access token expired.\n\n**Authentication:** the `refreshToken` cookie (path `/api/auth`); no access token needed. **Body:** none.\n\nThe session is **rotated**: the old refresh token is revoked and works only once, so running this twice with the same cookie fails the second time. Postman stores the new cookies automatically, so consecutive runs in Postman succeed.\n\nOn failure the cookies are left unchanged; log in again.\n\n| Status | When |\n| --- | --- |\n| `200` | New cookies set, body contains the user |\n| `401` | `Refresh token required` (no cookie) or `Invalid or expired refresh token` (unknown, expired, already used, or logged out) |"
+          },
+          "response": [
+            {
+              "name": "200 OK (sets new cookies)",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/refresh",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "refresh"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                },
+                {
+                  "key": "Set-Cookie",
+                  "value": "accessToken=<JWT>; Max-Age=900; Path=/; Expires=Thu, 24 Sep 2026 09:30:32 GMT; HttpOnly; SameSite=Lax"
+                },
+                {
+                  "key": "Set-Cookie",
+                  "value": "refreshToken=<80-hex-char token>; Max-Age=604800; Path=/api/auth; Expires=Thu, 01 Oct 2026 09:15:32 GMT; HttpOnly; SameSite=Lax"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"user\": {\n      \"name\": \"Jane Doe\",\n      \"email\": \"jane.doe@example.com\",\n      \"role\": \"USER\",\n      \"createdAt\": \"2026-09-24T09:15:32.481Z\",\n      \"updatedAt\": \"2026-09-24T09:15:32.481Z\",\n      \"id\": \"66f2a1c4e5b7d8a9c0f1a2b3\"\n    }\n  }\n}"
+            },
+            {
+              "name": "401 No refresh cookie",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/refresh",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "refresh"
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Refresh token required\"\n}"
+            },
+            {
+              "name": "401 Refresh token invalid or already used",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/refresh",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "refresh"
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Invalid or expired refresh token\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Logout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/auth/logout",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "auth",
+                "logout"
+              ]
+            },
+            "description": "Revokes the session behind the `refreshToken` cookie and clears both cookies. The access token stops working immediately (every protected call checks the session).\n\n**Authentication:** not required; it works even when the access token has already expired, or with no cookies at all. **Body:** none.\n\nOnly the current session (device) is logged out; other logins of the same user stay active.\n\n| Status | When |\n| --- | --- |\n| `200` | Always |"
+          },
+          "response": [
+            {
+              "name": "200 OK (clears cookies)",
+              "originalRequest": {
+                "method": "POST",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/auth/logout",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "auth",
+                    "logout"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                },
+                {
+                  "key": "Set-Cookie",
+                  "value": "accessToken=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax"
+                },
+                {
+                  "key": "Set-Cookie",
+                  "value": "refreshToken=; Path=/api/auth; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Lax"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Logged out\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Service Requests",
+      "description": "Service requests (`/api/requests`). **Every endpoint requires a logged-in user** (the `accessToken` cookie); without it the API returns `401`.\n\n## Who can do what\n\n| Action | USER | ADMIN |\n| --- | --- | --- |\n| Create | Yes (becomes the owner) | No, `403` |\n| List | Only their own | All requests |\n| Get by ID | Only their own; another user's request returns `404` | Any request |\n| Update fields | Only their own, only while `PENDING` (else `409`) | No, `403` |\n| Cancel (`DELETE`) | Only their own, while `PENDING` or `IN_PROGRESS` (else `409`) | No, `403` |\n| Change status | No, `403` | Any request, following the workflow |\n\nRoles are checked by the route (`403`). Ownership is checked in the service and reported as `404 Request not found`, exactly as for a missing request, so a USER cannot discover other users' request ids.\n\n## Fields\n\n| Field | Type | Rules |\n| --- | --- | --- |\n| `title` | string | Trimmed, 3–100 characters |\n| `description` | string | Trimmed, 10–2000 characters |\n| `category` | string | One of `TECHNICAL`, `BILLING`, `ACCOUNT`, `OTHER` |\n| `priority` | string | Optional. One of `LOW`, `MEDIUM`, `HIGH` (default `MEDIUM`) |\n\n`status` always starts as `PENDING` and **cannot** be set on create or update (it is ignored). It changes only through *Cancel request* (USER) or *Update request status* (ADMIN). `createdBy` is taken from the logged-in user; a `createdBy` sent in the body is ignored.\n\n## Status workflow\n\n```\nPENDING ──► IN_PROGRESS ──► RESOLVED   (final)\n   │             │\n   └─────────────┴────────► CANCELLED  (final)\n```\n\n| From | Allowed next statuses |\n| --- | --- |\n| `PENDING` | `IN_PROGRESS`, `CANCELLED` |\n| `IN_PROGRESS` | `RESOLVED`, `CANCELLED` |\n| `RESOLVED` | none (final) |\n| `CANCELLED` | none (final) |\n\nAny other change, including a \"change\" to the same status (e.g. `PENDING` → `PENDING`), returns `409 Cannot change status from X to Y`.\n\n## Common errors\n\n| Status | When |\n| --- | --- |\n| `400` | `Validation failed` (`errors` per field), `Invalid ID` (`:id` is not an ObjectId), `Malformed JSON` |\n| `401` | Not logged in, or the access token/session is no longer valid |\n| `403` | Role not allowed for this endpoint |\n| `404` | Request does not exist, or belongs to another USER |\n| `409` | Status rule violated |",
+      "item": [
+        {
+          "name": "Create request",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 201', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) {",
+                  "  pm.collectionVariables.set('requestId', pm.response.json().data.request._id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/requests",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "requests"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Laptop will not boot\",\n  \"description\": \"Black screen after the manufacturer logo since this morning.\",\n  \"category\": \"TECHNICAL\",\n  \"priority\": \"HIGH\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Creates a service request owned by the logged-in USER. The new request always starts as `PENDING`.\n\n**Authentication:** required. **Role:** `USER` only (an ADMIN gets `403`).\n\n**Body (JSON)**\n\n| Field | Type | Required | Rules |\n| --- | --- | --- | --- |\n| `title` | string | yes | Trimmed, 3–100 characters |\n| `description` | string | yes | Trimmed, 10–2000 characters |\n| `category` | string | yes | `TECHNICAL`, `BILLING`, `ACCOUNT` or `OTHER` |\n| `priority` | string | no | `LOW`, `MEDIUM` or `HIGH`; defaults to `MEDIUM` |\n\nDo not send `status` or `createdBy`: they are controlled by the backend and ignored if present.\n\nThe response returns `createdBy` as the owner's id (not populated).\n\n**Script:** stores `data.request._id` in `{{requestId}}`.\n\n| Status | When |\n| --- | --- |\n| `201` | Created |\n| `400` | `Validation failed` (`errors` lists each invalid field) or `Malformed JSON` |\n| `401` | Not logged in |\n| `403` | Logged in as ADMIN |"
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"title\": \"Laptop will not boot\",\n  \"description\": \"Black screen after the manufacturer logo since this morning.\",\n  \"category\": \"TECHNICAL\",\n  \"priority\": \"HIGH\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Request created\",\n  \"data\": {\n    \"request\": {\n      \"title\": \"Laptop will not boot\",\n      \"description\": \"Black screen after the manufacturer logo since this morning.\",\n      \"category\": \"TECHNICAL\",\n      \"priority\": \"HIGH\",\n      \"status\": \"PENDING\",\n      \"createdBy\": \"66f2a1c4e5b7d8a9c0f1a2b3\",\n      \"_id\": \"66f2a3d5e6f7a8b9c0d1e2f3\",\n      \"createdAt\": \"2026-09-24T09:15:32.481Z\",\n      \"updatedAt\": \"2026-09-24T09:15:32.481Z\",\n      \"__v\": 0\n    }\n  }\n}"
+            },
+            {
+              "name": "400 Validation failed",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"title\": \"Hi\",\n  \"description\": \"Too short\",\n  \"category\": \"HARDWARE\",\n  \"priority\": \"URGENT\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Validation failed\",\n  \"errors\": {\n    \"title\": \"Title must be between 3 and 100 characters\",\n    \"description\": \"Description must be between 10 and 2000 characters\",\n    \"category\": \"Category must be one of: TECHNICAL, BILLING, ACCOUNT, OTHER\",\n    \"priority\": \"Priority must be one of: LOW, MEDIUM, HIGH\"\n  }\n}"
+            },
+            {
+              "name": "401 Not logged in",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"title\": \"Laptop will not boot\",\n  \"description\": \"Black screen after the manufacturer logo since this morning.\",\n  \"category\": \"TECHNICAL\",\n  \"priority\": \"HIGH\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Authentication required\"\n}"
+            },
+            {
+              "name": "403 ADMIN cannot create requests",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"title\": \"Laptop will not boot\",\n  \"description\": \"Black screen after the manufacturer logo since this morning.\",\n  \"category\": \"TECHNICAL\",\n  \"priority\": \"HIGH\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"You do not have permission to perform this action\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "List requests",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/requests?page=1&limit=10",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "requests"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "description": "Page number. Whole number ≥ 1. Default `1`."
+                },
+                {
+                  "key": "limit",
+                  "value": "10",
+                  "description": "Page size. Whole number 1–50. Default `10`."
+                },
+                {
+                  "key": "status",
+                  "value": "PENDING",
+                  "description": "Optional filter: `PENDING`, `IN_PROGRESS`, `RESOLVED` or `CANCELLED`.",
+                  "disabled": true
+                },
+                {
+                  "key": "category",
+                  "value": "TECHNICAL",
+                  "description": "Optional filter: `TECHNICAL`, `BILLING`, `ACCOUNT` or `OTHER`.",
+                  "disabled": true
+                },
+                {
+                  "key": "priority",
+                  "value": "HIGH",
+                  "description": "Optional filter: `LOW`, `MEDIUM` or `HIGH`.",
+                  "disabled": true
+                },
+                {
+                  "key": "search",
+                  "value": "laptop",
+                  "description": "Optional. Case-insensitive literal match anywhere in `title` or `description`. Empty/whitespace means no search.",
+                  "disabled": true
+                },
+                {
+                  "key": "sortBy",
+                  "value": "createdAt",
+                  "description": "`createdAt` (default) or `updatedAt`.",
+                  "disabled": true
+                },
+                {
+                  "key": "order",
+                  "value": "desc",
+                  "description": "`desc` (default) or `asc`.",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Lists service requests with pagination, filters, search and sorting.\n\n**Authentication:** required. **Role:** `USER` or `ADMIN`.\n\n- A **USER** only ever sees their own requests, whatever the filters say.\n- An **ADMIN** sees every request.\n\n**Query parameters** (all optional; enable the ones you need in the *Params* tab)\n\n| Parameter | Default | Rules |\n| --- | --- | --- |\n| `page` | `1` | Whole number ≥ 1 |\n| `limit` | `10` | Whole number 1–50 |\n| `status` | none | `PENDING`, `IN_PROGRESS`, `RESOLVED`, `CANCELLED` |\n| `category` | none | `TECHNICAL`, `BILLING`, `ACCOUNT`, `OTHER` |\n| `priority` | none | `LOW`, `MEDIUM`, `HIGH` |\n| `search` | none | Case-insensitive, literal match in `title` or `description` |\n| `sortBy` | `createdAt` | `createdAt` or `updatedAt` |\n| `order` | `desc` | `asc` or `desc` |\n\nAn invalid value (e.g. `page=abc`, `limit=51`, `status=` empty, or a parameter repeated twice) returns `400` listing every bad parameter; it is never replaced by the default. Unknown parameters are ignored.\n\n`data` is the array of requests with `createdBy` populated as `{ name, email, id }`. `pagination.total` counts all matching requests; `totalPages` is `ceil(total / limit)` (`0` when nothing matches). A page past the end returns an empty array.\n\n| Status | When |\n| --- | --- |\n| `200` | OK |\n| `400` | `Validation failed` for a query parameter |\n| `401` | Not logged in |"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/requests?page=1&limit=10",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests"
+                  ],
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "description": "Page number. Whole number ≥ 1. Default `1`."
+                    },
+                    {
+                      "key": "limit",
+                      "value": "10",
+                      "description": "Page size. Whole number 1–50. Default `10`."
+                    },
+                    {
+                      "key": "status",
+                      "value": "PENDING",
+                      "description": "Optional filter: `PENDING`, `IN_PROGRESS`, `RESOLVED` or `CANCELLED`.",
+                      "disabled": true
+                    },
+                    {
+                      "key": "category",
+                      "value": "TECHNICAL",
+                      "description": "Optional filter: `TECHNICAL`, `BILLING`, `ACCOUNT` or `OTHER`.",
+                      "disabled": true
+                    },
+                    {
+                      "key": "priority",
+                      "value": "HIGH",
+                      "description": "Optional filter: `LOW`, `MEDIUM` or `HIGH`.",
+                      "disabled": true
+                    },
+                    {
+                      "key": "search",
+                      "value": "laptop",
+                      "description": "Optional. Case-insensitive literal match anywhere in `title` or `description`. Empty/whitespace means no search.",
+                      "disabled": true
+                    },
+                    {
+                      "key": "sortBy",
+                      "value": "createdAt",
+                      "description": "`createdAt` (default) or `updatedAt`.",
+                      "disabled": true
+                    },
+                    {
+                      "key": "order",
+                      "value": "desc",
+                      "description": "`desc` (default) or `asc`.",
+                      "disabled": true
+                    }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"data\": [\n    {\n      \"title\": \"Laptop will not boot\",\n      \"description\": \"Black screen after the manufacturer logo since this morning.\",\n      \"category\": \"TECHNICAL\",\n      \"priority\": \"HIGH\",\n      \"status\": \"PENDING\",\n      \"createdBy\": {\n        \"name\": \"Jane Doe\",\n        \"email\": \"jane.doe@example.com\",\n        \"id\": \"66f2a1c4e5b7d8a9c0f1a2b3\"\n      },\n      \"_id\": \"66f2a3d5e6f7a8b9c0d1e2f3\",\n      \"createdAt\": \"2026-09-24T09:15:32.481Z\",\n      \"updatedAt\": \"2026-09-24T09:15:32.481Z\",\n      \"__v\": 0\n    }\n  ],\n  \"pagination\": {\n    \"page\": 1,\n    \"limit\": 10,\n    \"total\": 1,\n    \"totalPages\": 1\n  }\n}"
+            },
+            {
+              "name": "400 Invalid query parameters",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/requests?page=abc&limit=51&status=OPEN",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests"
+                  ],
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "abc"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "51"
+                    },
+                    {
+                      "key": "status",
+                      "value": "OPEN"
+                    }
+                  ]
+                }
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Validation failed\",\n  \"errors\": {\n    \"page\": \"Page must be a whole number of at least 1\",\n    \"limit\": \"Limit must be a whole number between 1 and 50\",\n    \"status\": \"status must be one of: PENDING, IN_PROGRESS, RESOLVED, CANCELLED\"\n  }\n}"
+            },
+            {
+              "name": "401 Not logged in",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/requests?page=1&limit=10",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests"
+                  ],
+                  "query": [
+                    {
+                      "key": "page",
+                      "value": "1",
+                      "description": "Page number. Whole number ≥ 1. Default `1`."
+                    },
+                    {
+                      "key": "limit",
+                      "value": "10",
+                      "description": "Page size. Whole number 1–50. Default `10`."
+                    },
+                    {
+                      "key": "status",
+                      "value": "PENDING",
+                      "description": "Optional filter: `PENDING`, `IN_PROGRESS`, `RESOLVED` or `CANCELLED`.",
+                      "disabled": true
+                    },
+                    {
+                      "key": "category",
+                      "value": "TECHNICAL",
+                      "description": "Optional filter: `TECHNICAL`, `BILLING`, `ACCOUNT` or `OTHER`.",
+                      "disabled": true
+                    },
+                    {
+                      "key": "priority",
+                      "value": "HIGH",
+                      "description": "Optional filter: `LOW`, `MEDIUM` or `HIGH`.",
+                      "disabled": true
+                    },
+                    {
+                      "key": "search",
+                      "value": "laptop",
+                      "description": "Optional. Case-insensitive literal match anywhere in `title` or `description`. Empty/whitespace means no search.",
+                      "disabled": true
+                    },
+                    {
+                      "key": "sortBy",
+                      "value": "createdAt",
+                      "description": "`createdAt` (default) or `updatedAt`.",
+                      "disabled": true
+                    },
+                    {
+                      "key": "order",
+                      "value": "desc",
+                      "description": "`desc` (default) or `asc`.",
+                      "disabled": true
+                    }
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Authentication required\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get request by ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/requests/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "requests",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{requestId}}",
+                  "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                }
+              ]
+            },
+            "description": "Returns one service request, with `createdBy` populated as `{ name, email, id }`.\n\n**Authentication:** required. **Role:** `USER` (own requests only) or `ADMIN` (any request).\n\n**Path parameters**\n\n| Name | Description |\n| --- | --- |\n| `id` | Request `_id` (MongoDB ObjectId). Defaults to `{{requestId}}`. |\n\n| Status | When |\n| --- | --- |\n| `200` | OK |\n| `400` | `Invalid ID`: `:id` is not a valid ObjectId |\n| `401` | Not logged in |\n| `404` | `Request not found`: no such request, **or** it belongs to another USER (ownership is not revealed as `403`) |"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"data\": {\n    \"request\": {\n      \"title\": \"Laptop will not boot\",\n      \"description\": \"Black screen after the manufacturer logo since this morning.\",\n      \"category\": \"TECHNICAL\",\n      \"priority\": \"HIGH\",\n      \"status\": \"PENDING\",\n      \"createdBy\": {\n        \"name\": \"Jane Doe\",\n        \"email\": \"jane.doe@example.com\",\n        \"id\": \"66f2a1c4e5b7d8a9c0f1a2b3\"\n      },\n      \"_id\": \"66f2a3d5e6f7a8b9c0d1e2f3\",\n      \"createdAt\": \"2026-09-24T09:15:32.481Z\",\n      \"updatedAt\": \"2026-09-24T09:15:32.481Z\",\n      \"__v\": 0\n    }\n  }\n}"
+            },
+            {
+              "name": "400 Invalid ID",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "not-an-id"
+                    }
+                  ]
+                }
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Invalid ID\"\n}"
+            },
+            {
+              "name": "401 Not logged in",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Authentication required\"\n}"
+            },
+            {
+              "name": "404 Not found or owned by another user",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                }
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Request not found\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update request",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/requests/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "requests",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{requestId}}",
+                  "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Laptop will not boot after update\",\n  \"priority\": \"MEDIUM\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Partially updates the content of the logged-in USER's own request. Only allowed while the request is `PENDING`.\n\n**Authentication:** required. **Role:** `USER` only (an ADMIN gets `403`).\n\n**Path parameters:** `id`, the request `_id` (defaults to `{{requestId}}`).\n\n**Body (JSON):** any of the fields below; send only the ones you change, but **at least one** is required.\n\n| Field | Type | Rules |\n| --- | --- | --- |\n| `title` | string | Trimmed, 3–100 characters |\n| `description` | string | Trimmed, 10–2000 characters |\n| `category` | string | One of `TECHNICAL`, `BILLING`, `ACCOUNT`, `OTHER` |\n| `priority` | string | Optional. One of `LOW`, `MEDIUM`, `HIGH` (default `MEDIUM`) |\n\n`status` cannot be changed here (it is ignored); use *Cancel request* or the ADMIN status endpoint. A body containing only `status` is rejected with `400 At least one field is required`.\n\nThe response returns `createdBy` as the owner's id (not populated).\n\n| Status | When |\n| --- | --- |\n| `200` | Updated |\n| `400` | `At least one field is required`, `Validation failed` (`errors` per field), `Invalid ID`, or `Malformed JSON` |\n| `401` | Not logged in |\n| `403` | Logged in as ADMIN |\n| `404` | `Request not found`: no such request, or it belongs to another USER |\n| `409` | `Only pending requests can be edited` (status is `IN_PROGRESS`, `RESOLVED` or `CANCELLED`) |"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"title\": \"Laptop will not boot after update\",\n  \"priority\": \"MEDIUM\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Request updated\",\n  \"data\": {\n    \"request\": {\n      \"title\": \"Laptop will not boot after update\",\n      \"description\": \"Black screen after the manufacturer logo since this morning.\",\n      \"category\": \"TECHNICAL\",\n      \"priority\": \"MEDIUM\",\n      \"status\": \"PENDING\",\n      \"createdBy\": \"66f2a1c4e5b7d8a9c0f1a2b3\",\n      \"_id\": \"66f2a3d5e6f7a8b9c0d1e2f3\",\n      \"createdAt\": \"2026-09-24T09:15:32.481Z\",\n      \"updatedAt\": \"2026-09-24T09:42:10.127Z\",\n      \"__v\": 0\n    }\n  }\n}"
+            },
+            {
+              "name": "400 No updatable field",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"RESOLVED\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"At least one field is required\"\n}"
+            },
+            {
+              "name": "400 Validation failed",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"category\": \"HARDWARE\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Validation failed\",\n  \"errors\": {\n    \"category\": \"Category must be one of: TECHNICAL, BILLING, ACCOUNT, OTHER\"\n  }\n}"
+            },
+            {
+              "name": "403 ADMIN cannot edit requests",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"title\": \"Laptop will not boot after update\",\n  \"priority\": \"MEDIUM\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"You do not have permission to perform this action\"\n}"
+            },
+            {
+              "name": "404 Not found or owned by another user",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"title\": \"Laptop will not boot after update\",\n  \"priority\": \"MEDIUM\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Request not found\"\n}"
+            },
+            {
+              "name": "409 Request is no longer PENDING",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"title\": \"Laptop will not boot after update\",\n  \"priority\": \"MEDIUM\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Conflict",
+              "code": 409,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Only pending requests can be edited\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Cancel request",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/requests/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "requests",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{requestId}}",
+                  "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                }
+              ]
+            },
+            "description": "Cancels the logged-in USER's own request by setting its status to `CANCELLED`. Despite the `DELETE` method, **nothing is deleted**: the request stays in the history and is returned in the response.\n\n**Authentication:** required. **Role:** `USER` only (an ADMIN gets `403`; admins cancel through *Update request status*).\n\n**Path parameters:** `id`, the request `_id` (defaults to `{{requestId}}`). **Body:** none.\n\nAllowed from `PENDING` and `IN_PROGRESS`. `RESOLVED` and `CANCELLED` are final, so cancelling them returns `409`.\n\n| Status | When |\n| --- | --- |\n| `200` | Cancelled; `data.request.status` is `CANCELLED` |\n| `400` | `Invalid ID` |\n| `401` | Not logged in |\n| `403` | Logged in as ADMIN |\n| `404` | `Request not found`: no such request, or it belongs to another USER |\n| `409` | `Cannot change status from RESOLVED to CANCELLED` / `from CANCELLED to CANCELLED` |"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Request cancelled\",\n  \"data\": {\n    \"request\": {\n      \"title\": \"Laptop will not boot\",\n      \"description\": \"Black screen after the manufacturer logo since this morning.\",\n      \"category\": \"TECHNICAL\",\n      \"priority\": \"HIGH\",\n      \"status\": \"CANCELLED\",\n      \"createdBy\": \"66f2a1c4e5b7d8a9c0f1a2b3\",\n      \"_id\": \"66f2a3d5e6f7a8b9c0d1e2f3\",\n      \"createdAt\": \"2026-09-24T09:15:32.481Z\",\n      \"updatedAt\": \"2026-09-24T09:42:10.127Z\",\n      \"__v\": 0\n    }\n  }\n}"
+            },
+            {
+              "name": "403 ADMIN cannot cancel via this endpoint",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                }
+              },
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"You do not have permission to perform this action\"\n}"
+            },
+            {
+              "name": "404 Not found or owned by another user",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                }
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Request not found\"\n}"
+            },
+            {
+              "name": "409 Request already in a final state",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                }
+              },
+              "status": "Conflict",
+              "code": 409,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Cannot change status from RESOLVED to CANCELLED\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Update request status (ADMIN)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/requests/:id/status",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "requests",
+                ":id",
+                "status"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{requestId}}",
+                  "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"IN_PROGRESS\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Moves any request to its next status, following the workflow.\n\n**Authentication:** required. **Role:** `ADMIN` only (a USER gets `403`). Run *Authentication › Login (ADMIN)* first.\n\n**Path parameters:** `id`, the request `_id` (defaults to `{{requestId}}`).\n\n**Body (JSON)**\n\n| Field | Type | Required | Rules |\n| --- | --- | --- | --- |\n| `status` | string | yes | `PENDING`, `IN_PROGRESS`, `RESOLVED` or `CANCELLED`, **and** allowed from the current status |\n\n**Valid transitions**\n\n```\nPENDING ──► IN_PROGRESS ──► RESOLVED   (final)\n   │             │\n   └─────────────┴────────► CANCELLED  (final)\n```\n\n| From | Allowed next statuses |\n| --- | --- |\n| `PENDING` | `IN_PROGRESS`, `CANCELLED` |\n| `IN_PROGRESS` | `RESOLVED`, `CANCELLED` |\n| `RESOLVED` | none (final) |\n| `CANCELLED` | none (final) |\n\nAny other change, including a \"change\" to the same status (e.g. `PENDING` → `PENDING`), returns `409 Cannot change status from X to Y`.\n\nThe body is validated before the request is looked up, so an invalid `status` value returns `400` even for an unknown id.\n\n| Status | When |\n| --- | --- |\n| `200` | Status changed |\n| `400` | `Validation failed` (`status` missing or not one of the four values), `Invalid ID`, or `Malformed JSON` |\n| `401` | Not logged in |\n| `403` | Logged in as USER |\n| `404` | `Request not found` |\n| `409` | `Cannot change status from X to Y`: transition not allowed (including same status, and anything from `RESOLVED`/`CANCELLED`) |"
+          },
+          "response": [
+            {
+              "name": "200 PENDING → IN_PROGRESS",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id",
+                    "status"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"IN_PROGRESS\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Status updated\",\n  \"data\": {\n    \"request\": {\n      \"title\": \"Laptop will not boot\",\n      \"description\": \"Black screen after the manufacturer logo since this morning.\",\n      \"category\": \"TECHNICAL\",\n      \"priority\": \"HIGH\",\n      \"status\": \"IN_PROGRESS\",\n      \"createdBy\": \"66f2a1c4e5b7d8a9c0f1a2b3\",\n      \"_id\": \"66f2a3d5e6f7a8b9c0d1e2f3\",\n      \"createdAt\": \"2026-09-24T09:15:32.481Z\",\n      \"updatedAt\": \"2026-09-24T09:42:10.127Z\",\n      \"__v\": 0\n    }\n  }\n}"
+            },
+            {
+              "name": "200 IN_PROGRESS → RESOLVED",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id",
+                    "status"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"RESOLVED\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"Status updated\",\n  \"data\": {\n    \"request\": {\n      \"title\": \"Laptop will not boot\",\n      \"description\": \"Black screen after the manufacturer logo since this morning.\",\n      \"category\": \"TECHNICAL\",\n      \"priority\": \"HIGH\",\n      \"status\": \"RESOLVED\",\n      \"createdBy\": \"66f2a1c4e5b7d8a9c0f1a2b3\",\n      \"_id\": \"66f2a3d5e6f7a8b9c0d1e2f3\",\n      \"createdAt\": \"2026-09-24T09:15:32.481Z\",\n      \"updatedAt\": \"2026-09-24T09:42:10.127Z\",\n      \"__v\": 0\n    }\n  }\n}"
+            },
+            {
+              "name": "400 Invalid status value",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id",
+                    "status"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"DONE\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Bad Request",
+              "code": 400,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Validation failed\",\n  \"errors\": {\n    \"status\": \"Status must be one of: PENDING, IN_PROGRESS, RESOLVED, CANCELLED\"\n  }\n}"
+            },
+            {
+              "name": "403 USER cannot change status",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id",
+                    "status"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"IN_PROGRESS\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"You do not have permission to perform this action\"\n}"
+            },
+            {
+              "name": "404 Not found",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id",
+                    "status"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"IN_PROGRESS\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Request not found\"\n}"
+            },
+            {
+              "name": "409 Transition not allowed",
+              "originalRequest": {
+                "method": "PATCH",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{baseUrl}}/requests/:id/status",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "requests",
+                    ":id",
+                    "status"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": "{{requestId}}",
+                      "description": "Service request `_id` (24-character hex MongoDB ObjectId). Defaults to `{{requestId}}`, set by *Create request*."
+                    }
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"status\": \"RESOLVED\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "status": "Conflict",
+              "code": 409,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Cannot change status from PENDING to RESOLVED\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Users / Admin",
+      "description": "Admin-only user management (`/api/users`).\n\n`GET /api/users` is currently the only endpoint under `/api/users`. There are no endpoints to view, update, delete or change the role of a single user. ADMIN-only request operations (status changes) are in the *Service Requests* folder.\n\nRun *Authentication › Login (ADMIN)* before these requests.",
+      "item": [
+        {
+          "name": "List users",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/users",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "users"
+              ]
+            },
+            "description": "Lists every user (USERs and ADMINs), newest first. No pagination, filters or query parameters.\n\n**Authentication:** required. **Role:** `ADMIN` only.\n\nEach user has `id`, `name`, `email`, `role`, `createdAt` and `updatedAt`; password hashes are never returned.\n\n| Status | When |\n| --- | --- |\n| `200` | OK |\n| `401` | Not logged in |\n| `403` | Logged in as USER |"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/users",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "users"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"data\": [\n    {\n      \"name\": \"Jane Doe\",\n      \"email\": \"jane.doe@example.com\",\n      \"role\": \"USER\",\n      \"createdAt\": \"2026-09-24T09:15:32.481Z\",\n      \"updatedAt\": \"2026-09-24T09:15:32.481Z\",\n      \"id\": \"66f2a1c4e5b7d8a9c0f1a2b3\"\n    },\n    {\n      \"name\": \"System Admin\",\n      \"email\": \"admin@example.com\",\n      \"role\": \"ADMIN\",\n      \"createdAt\": \"2026-09-20T08:00:00.000Z\",\n      \"updatedAt\": \"2026-09-20T08:00:00.000Z\",\n      \"id\": \"66f2a0b1c2d3e4f5a6b7c8d9\"\n    }\n  ]\n}"
+            },
+            {
+              "name": "401 Not logged in",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/users",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "users"
+                  ]
+                }
+              },
+              "status": "Unauthorized",
+              "code": 401,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"Authentication required\"\n}"
+            },
+            {
+              "name": "403 USER cannot list users",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/users",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "users"
+                  ]
+                }
+              },
+              "status": "Forbidden",
+              "code": 403,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": false,\n  \"message\": \"You do not have permission to perform this action\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "description": "Service health check (`/api/health`). Public; no cookies needed.",
+      "item": [
+        {
+          "name": "Health check",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status code is 200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "Confirms that the API process is running. It does not check the database.\n\n**Authentication:** none.\n\n| Status | When |\n| --- | --- |\n| `200` | API is running |"
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "originalRequest": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{baseUrl}}/health",
+                  "host": [
+                    "{{baseUrl}}"
+                  ],
+                  "path": [
+                    "health"
+                  ]
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json; charset=utf-8"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"success\": true,\n  \"message\": \"API is running\"\n}"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5000/api",
+      "type": "string",
+      "description": "API root (PORT 5000 + /api prefix)."
+    },
+    {
+      "key": "userName",
+      "value": "Jane Doe",
+      "type": "string",
+      "description": "Name used by Register (2–50 characters)."
+    },
+    {
+      "key": "userEmail",
+      "value": "jane.doe@example.com",
+      "type": "string",
+      "description": "USER account email for Register and Login (USER)."
+    },
+    {
+      "key": "userPassword",
+      "value": "Password123!",
+      "type": "string",
+      "description": "USER account password (8–72 characters)."
+    },
+    {
+      "key": "adminEmail",
+      "value": "admin@example.com",
+      "type": "string",
+      "description": "Seeded ADMIN email; set to SEED_ADMIN_EMAIL from backend/.env."
+    },
+    {
+      "key": "adminPassword",
+      "value": "replace-with-a-strong-password",
+      "type": "string",
+      "description": "Seeded ADMIN password; set to SEED_ADMIN_PASSWORD from backend/.env."
+    },
+    {
+      "key": "userId",
+      "value": "",
+      "type": "string",
+      "description": "Set automatically by Register / Login (USER). Reference only."
+    },
+    {
+      "key": "requestId",
+      "value": "",
+      "type": "string",
+      "description": "Set automatically by Create request; used by /requests/:id calls."
+    }
+  ]
+}
