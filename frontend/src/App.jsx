@@ -1,5 +1,7 @@
 import { useState } from 'react'
-import { API_URL, getHealth } from './services/api.js'
+import { request } from './api/client.js'
+
+const API_URL = import.meta.env.VITE_API_URL
 
 function App() {
   const [status, setStatus] = useState('idle')
@@ -8,7 +10,7 @@ function App() {
   async function handleCheck() {
     setStatus('loading')
     try {
-      const data = await getHealth()
+      const data = await request('/health')
       setStatus('ok')
       setMessage(data.message)
     } catch (error) {
