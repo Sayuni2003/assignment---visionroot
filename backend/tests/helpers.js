@@ -28,6 +28,18 @@ export async function stopDatabase() {
   await mongoServer.stop();
 }
 
+// Reads a response's Set-Cookie headers into { name: value }, e.g. { accessToken: '...' }.
+export function cookiesFrom(res) {
+  const headers = res.headers['set-cookie'] ?? [];
+  return Object.fromEntries(
+    headers.map((header) => {
+      const pair = header.split(';')[0];
+      const separator = pair.indexOf('=');
+      return [pair.slice(0, separator), pair.slice(separator + 1)];
+    }),
+  );
+}
+
 // Logs in and returns { user, cookie }. `cookie` holds every cookie the login set, ready for
 // .set('Cookie', cookie) on later requests.
 export async function login(email, password = PASSWORD) {

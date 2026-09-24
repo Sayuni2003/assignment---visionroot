@@ -166,6 +166,7 @@ npm test -- --watch                       # re-run on every file change
 | ---- | -------------- |
 | `tests/setup-env.js` | Sets test environment variables before `src/config/env.js` loads (Jest `setupFiles`) |
 | `tests/helpers.js` | Shared helpers: start, clear and stop the in-memory database; register and log in users; create an admin |
+| `tests/auth.api.test.js` | API tests for `/api/auth` and `/api/users`: register, login, `me`, refresh rotation, logout, admin-only user listing, and the role being read from the database |
 | `tests/request.constants.test.js` | Unit tests for `canTransition`: every allowed and forbidden transition, and unknown statuses |
 | `tests/requests.api.test.js` | API tests for `/api/requests`: authentication and roles, validation, ownership, editing, cancelling, admin status changes, pagination, filtering and search |
 
